@@ -1,0 +1,24 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+broadcast/
+broadcast/*/31337/
+
+# Dotenv file
+.env
+
+# Coverage
+coverage/
+lcov.info
+
+# Node modules (if any)
+node_modules/
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
