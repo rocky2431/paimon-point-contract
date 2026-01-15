@@ -32,6 +32,19 @@ contract PointsHub is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
     uint256 public constant PRECISION = 1e18;
+    uint256 public constant MAX_MODULES = 10;
+
+    /// @notice Gas limit for each module call (prevents DoS from malicious modules)
+    uint256 public constant MODULE_GAS_LIMIT = 100_000;
+
+    /// @notice Maximum exchange rate (prevents extreme values)
+    uint256 public constant MAX_EXCHANGE_RATE = 1e24;
+
+    /// @notice Minimum exchange rate (prevents dust amounts)
+    uint256 public constant MIN_EXCHANGE_RATE = 1e12;
+
+    /// @notice Contract version for upgrade tracking
+    string public constant VERSION = "1.2.0";
 
     // =============================================================================
     // State Variables
@@ -98,6 +111,12 @@ contract PointsHub is
     error InsufficientRewardTokens(uint256 available, uint256 required);
     error ExchangeRateNotSet();
     error RewardTokenNotSet();
+    error IndexOutOfBounds(uint256 index, uint256 length);
+    error InvalidModuleInterface(address module);
+    error MaxModulesReached();
+    error InvalidExchangeRate(uint256 rate, uint256 min, uint256 max);
+    error InvalidPenaltyModuleInterface(address module);
+    error ZeroTokenAmount();
 
     // =============================================================================
     // Constructor & Initializer
@@ -137,14 +156,37 @@ contract PointsHub is
     // =============================================================================
 
     /// @notice Get total points for a user across all active modules
+    /// @dev Uses try-catch to prevent one faulty module from blocking entire system
     /// @param user The user address
     /// @return total Total points from all modules
     function getTotalPoints(address user) public view returns (uint256 total) {
         uint256 len = modules.length;
-        for (uint256 i = 0; i < len; i++) {
-            if (modules[i].isActive()) {
-                total += modules[i].getPoints(user);
+        for (uint256 i = 0; i < len; ) {
+            address moduleAddr = address(modules[i]);
+
+            // Check if module is active with gas limit
+            (bool successActive, bytes memory dataActive) = moduleAddr.staticcall{gas: MODULE_GAS_LIMIT}(
+                abi.encodeWithSelector(IPointsModule.isActive.selector)
+            );
+
+            if (successActive && dataActive.length >= 32) {
+                bool isActiveFlag = abi.decode(dataActive, (bool));
+                if (isActiveFlag) {
+                    // Get points with gas limit
+                    (bool successPoints, bytes memory dataPoints) = moduleAddr.staticcall{gas: MODULE_GAS_LIMIT}(
+                        abi.encodeWithSelector(IPointsModule.getPoints.selector, user)
+                    );
+
+                    if (successPoints && dataPoints.length >= 32) {
+                        uint256 points = abi.decode(dataPoints, (uint256));
+                        total += points;
+                    }
+                    // If call failed or returned invalid data, skip module
+                }
             }
+            // If isActive call failed, skip module
+
+            unchecked { ++i; }
         }
     }
 
@@ -171,6 +213,7 @@ contract PointsHub is
     }
 
     /// @notice Get detailed points breakdown for a user
+    /// @dev Uses try-catch to handle faulty modules gracefully
     /// @param user The user address
     /// @return names Array of module names
     /// @return points Array of points per module
@@ -192,9 +235,25 @@ contract PointsHub is
         names = new string[](len);
         points = new uint256[](len);
 
-        for (uint256 i = 0; i < len; i++) {
-            names[i] = modules[i].moduleName();
-            points[i] = modules[i].isActive() ? modules[i].getPoints(user) : 0;
+        for (uint256 i = 0; i < len; ) {
+            try modules[i].moduleName() returns (string memory name) {
+                names[i] = name;
+            } catch {
+                names[i] = "Unknown";
+            }
+
+            try modules[i].isActive() returns (bool isActiveFlag) {
+                if (isActiveFlag) {
+                    try modules[i].getPoints(user) returns (uint256 pts) {
+                        points[i] = pts;
+                    } catch {
+                        points[i] = 0;
+                    }
+                }
+            } catch {
+                points[i] = 0;
+            }
+            unchecked { ++i; }
         }
 
         penalty = getPenaltyPoints(user);
@@ -220,6 +279,7 @@ contract PointsHub is
     /// @param index Module index
     /// @return Module address
     function getModuleAt(uint256 index) external view returns (address) {
+        if (index >= modules.length) revert IndexOutOfBounds(index, modules.length);
         return address(modules[index]);
     }
 
@@ -228,8 +288,9 @@ contract PointsHub is
     function getAllModules() external view returns (address[] memory) {
         uint256 len = modules.length;
         address[] memory result = new address[](len);
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             result[i] = address(modules[i]);
+            unchecked { ++i; }
         }
         return result;
     }
@@ -260,6 +321,9 @@ contract PointsHub is
         // Calculate token amount
         uint256 tokenAmount = previewRedeem(pointsAmount);
 
+        // Prevent precision loss - ensure non-zero token output
+        if (tokenAmount == 0) revert ZeroTokenAmount();
+
         // Check reward token balance
         uint256 available = rewardToken.balanceOf(address(this));
         if (tokenAmount > available) {
@@ -285,11 +349,26 @@ contract PointsHub is
     function registerModule(address module) external onlyRole(ADMIN_ROLE) {
         if (module == address(0)) revert ZeroAddress();
         if (isModule[module]) revert ModuleAlreadyRegistered(module);
+        if (modules.length >= MAX_MODULES) revert MaxModulesReached();
+
+        // Verify module implements required interface before adding
+        string memory name;
+        try IPointsModule(module).moduleName() returns (string memory _name) {
+            name = _name;
+        } catch {
+            revert InvalidModuleInterface(module);
+        }
+
+        // Verify getPoints and isActive are callable
+        try IPointsModule(module).isActive() returns (bool) {
+            // Valid
+        } catch {
+            revert InvalidModuleInterface(module);
+        }
 
         modules.push(IPointsModule(module));
         isModule[module] = true;
 
-        string memory name = IPointsModule(module).moduleName();
         emit ModuleRegistered(module, name, modules.length - 1);
     }
 
@@ -300,11 +379,12 @@ contract PointsHub is
 
         uint256 len = modules.length;
         uint256 indexToRemove;
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             if (address(modules[i]) == module) {
                 indexToRemove = i;
                 break;
             }
+            unchecked { ++i; }
         }
 
         // Swap with last and pop
@@ -315,9 +395,38 @@ contract PointsHub is
         emit ModuleRemoved(module, indexToRemove);
     }
 
+    /// @notice Emergency: Remove module by index (when module address lookup fails)
+    /// @dev Use only when a malicious module prevents normal removal
+    /// @param index Index of the module to remove
+    function emergencyRemoveModuleByIndex(uint256 index) external onlyRole(ADMIN_ROLE) {
+        if (index >= modules.length) revert IndexOutOfBounds(index, modules.length);
+
+        address moduleAddr = address(modules[index]);
+        isModule[moduleAddr] = false;
+
+        // Swap with last and pop
+        uint256 lastIndex = modules.length - 1;
+        if (index != lastIndex) {
+            modules[index] = modules[lastIndex];
+        }
+        modules.pop();
+
+        emit ModuleRemoved(moduleAddr, index);
+    }
+
     /// @notice Set the penalty module
-    /// @param _penaltyModule Address of the penalty module
+    /// @param _penaltyModule Address of the penalty module (address(0) to disable)
     function setPenaltyModule(address _penaltyModule) external onlyRole(ADMIN_ROLE) {
+        // Allow setting to address(0) to disable penalty module
+        if (_penaltyModule != address(0)) {
+            // Verify the module implements IPenaltyModule interface
+            try IPenaltyModule(_penaltyModule).getPenalty(address(0)) returns (uint256) {
+                // Valid interface
+            } catch {
+                revert InvalidPenaltyModuleInterface(_penaltyModule);
+            }
+        }
+
         address oldModule = address(penaltyModule);
         penaltyModule = IPenaltyModule(_penaltyModule);
         emit PenaltyModuleUpdated(oldModule, _penaltyModule);
@@ -338,6 +447,10 @@ contract PointsHub is
     /// @notice Set the exchange rate for points to tokens
     /// @param rate Exchange rate (1e18 precision)
     function setExchangeRate(uint256 rate) external onlyRole(ADMIN_ROLE) {
+        // Allow rate = 0 to disable redemption, otherwise enforce bounds
+        if (rate != 0 && (rate < MIN_EXCHANGE_RATE || rate > MAX_EXCHANGE_RATE)) {
+            revert InvalidExchangeRate(rate, MIN_EXCHANGE_RATE, MAX_EXCHANGE_RATE);
+        }
         uint256 oldRate = exchangeRate;
         exchangeRate = rate;
         emit ExchangeRateUpdated(oldRate, rate);
@@ -363,6 +476,7 @@ contract PointsHub is
     /// @param amount Amount to withdraw
     function withdrawRewardTokens(address to, uint256 amount) external onlyRole(ADMIN_ROLE) {
         if (to == address(0)) revert ZeroAddress();
+        if (address(rewardToken) == address(0)) revert RewardTokenNotSet();
         rewardToken.safeTransfer(to, amount);
     }
 
@@ -377,4 +491,17 @@ contract PointsHub is
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
+
+    /// @notice Get contract version
+    /// @return Version string
+    function version() external pure returns (string memory) {
+        return VERSION;
+    }
+
+    // =============================================================================
+    // Storage Gap - Reserved for future upgrades
+    // =============================================================================
+
+    /// @dev Reserved storage space to allow for layout changes in future upgrades
+    uint256[50] private __gap;
 }

@@ -32,6 +32,10 @@ contract HoldingModule is
 
     uint256 public constant PRECISION = 1e18;
     string public constant MODULE_NAME = "PPT Holding";
+    string public constant VERSION = "1.2.0";
+
+    /// @notice Maximum batch size for user checkpoints
+    uint256 public constant MAX_BATCH_USERS = 100;
 
     // =============================================================================
     // State Variables
@@ -61,6 +65,9 @@ contract HoldingModule is
     /// @notice User's last checkpoint timestamp
     mapping(address => uint256) public userLastCheckpoint;
 
+    /// @notice User's last checkpoint block number (for flash loan protection)
+    mapping(address => uint256) public userLastCheckpointBlock;
+
     /// @notice Whether the module is active
     bool public active;
 
@@ -73,6 +80,9 @@ contract HoldingModule is
 
     /// @notice Whether effectiveSupply mode has been determined
     bool public supplyModeInitialized;
+
+    /// @notice Minimum blocks a balance must be held before counting for points (flash loan protection)
+    uint256 public minHoldingBlocks;
 
     // =============================================================================
     // Events
@@ -90,6 +100,7 @@ contract HoldingModule is
     event ModuleActiveStatusUpdated(bool active);
     event HoldingModuleUpgraded(address indexed newImplementation, uint256 timestamp);
     event SupplyModeInitialized(bool useEffectiveSupply);
+    event PptUpdated(address indexed oldPpt, address indexed newPpt);
 
     // =============================================================================
     // Errors
@@ -97,6 +108,13 @@ contract HoldingModule is
 
     error ZeroAddress();
     error ZeroRate();
+    error BatchTooLarge(uint256 size, uint256 max);
+
+    // =============================================================================
+    // Additional Events
+    // =============================================================================
+
+    event MinHoldingBlocksUpdated(uint256 oldBlocks, uint256 newBlocks);
 
     // =============================================================================
     // Constructor & Initializer
@@ -209,9 +227,16 @@ contract HoldingModule is
     function _updateUser(address user) internal {
         uint256 cachedPointsPerShare = pointsPerShareStored;
         uint256 lastBalance = userLastBalance[user];
+        uint256 lastCheckpointBlock = userLastCheckpointBlock[user];
+
+        // Flash loan protection: only credit points if minimum holding blocks have passed
+        // This prevents attackers from borrowing tokens, checkpointing, and returning in same block
+        bool passedHoldingPeriod = lastCheckpointBlock == 0 ||
+            block.number >= lastCheckpointBlock + minHoldingBlocks;
 
         // Calculate new earned points using last recorded balance
-        if (lastBalance > 0 && lastBalance >= minBalanceThreshold) {
+        // Only credit if holding period requirement is met
+        if (lastBalance > 0 && lastBalance >= minBalanceThreshold && passedHoldingPeriod) {
             uint256 pointsDelta = cachedPointsPerShare - userPointsPerSharePaid[user];
             uint256 newEarned = (lastBalance * pointsDelta) / PRECISION;
             userPointsEarned[user] += newEarned;
@@ -222,6 +247,7 @@ contract HoldingModule is
         userPointsPerSharePaid[user] = cachedPointsPerShare;
         userLastBalance[user] = newBalance;
         userLastCheckpoint[user] = block.timestamp;
+        userLastCheckpointBlock[user] = block.number;
 
         emit UserCheckpointed(user, userPointsEarned[user], newBalance, block.timestamp);
     }
@@ -230,10 +256,10 @@ contract HoldingModule is
     // View Functions - IPointsModule Implementation
     // =============================================================================
 
-    /// @notice Get points for a user (real-time calculation)
+    /// @notice Internal calculation of user points
     /// @param user User address
     /// @return Total accumulated points
-    function getPoints(address user) external view override returns (uint256) {
+    function _calculatePoints(address user) internal view returns (uint256) {
         if (!active) return userPointsEarned[user];
 
         uint256 lastBalance = userLastBalance[user];
@@ -249,6 +275,13 @@ contract HoldingModule is
         }
 
         return earned;
+    }
+
+    /// @notice Get points for a user (real-time calculation)
+    /// @param user User address
+    /// @return Total accumulated points
+    function getPoints(address user) external view override returns (uint256) {
+        return _calculatePoints(user);
     }
 
     /// @notice Get module name
@@ -288,7 +321,7 @@ contract HoldingModule is
     {
         balance = ppt.balanceOf(user);
         lastCheckpointBalance = userLastBalance[user];
-        earnedPoints = this.getPoints(user);
+        earnedPoints = _calculatePoints(user);
         lastCheckpointTime = userLastCheckpoint[user];
     }
 
@@ -317,11 +350,14 @@ contract HoldingModule is
     /// @notice Checkpoint multiple users (keeper function)
     /// @param users Array of user addresses to checkpoint
     function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE) {
+        uint256 len = users.length;
+        if (len > MAX_BATCH_USERS) revert BatchTooLarge(len, MAX_BATCH_USERS);
+
         _updateGlobal();
 
-        uint256 len = users.length;
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             _updateUser(users[i]);
+            unchecked { ++i; }
         }
     }
 
@@ -380,10 +416,13 @@ contract HoldingModule is
     /// @param _ppt New PPT address
     function setPpt(address _ppt) external onlyRole(ADMIN_ROLE) {
         if (_ppt == address(0)) revert ZeroAddress();
+        if (_ppt == address(ppt)) return; // No change needed
         _updateGlobal();
+        address oldPpt = address(ppt);
         ppt = IPPT(_ppt);
         // Reset supply mode detection for new PPT
         supplyModeInitialized = false;
+        emit PptUpdated(oldPpt, _ppt);
     }
 
     /// @notice Force supply mode (admin override)
@@ -401,4 +440,25 @@ contract HoldingModule is
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
+
+    /// @notice Set minimum holding blocks for flash loan protection
+    /// @param blocks Minimum blocks a balance must be held
+    function setMinHoldingBlocks(uint256 blocks) external onlyRole(ADMIN_ROLE) {
+        uint256 oldBlocks = minHoldingBlocks;
+        minHoldingBlocks = blocks;
+        emit MinHoldingBlocksUpdated(oldBlocks, blocks);
+    }
+
+    /// @notice Get contract version
+    /// @return Version string
+    function version() external pure returns (string memory) {
+        return VERSION;
+    }
+
+    // =============================================================================
+    // Storage Gap - Reserved for future upgrades
+    // =============================================================================
+
+    /// @dev Reserved storage space to allow for layout changes in future upgrades
+    uint256[50] private __gap;
 }

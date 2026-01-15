@@ -32,6 +32,16 @@ contract ActivityModule is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
     string public constant MODULE_NAME = "Trading & Activity";
+    string public constant VERSION = "1.2.0";
+
+    /// @notice Maximum batch size for claims
+    uint256 public constant MAX_BATCH_SIZE = 100;
+
+    /// @notice Time delay before a new Merkle root becomes effective (anti-frontrun)
+    uint256 public constant ROOT_DELAY = 24 hours;
+
+    /// @notice Maximum number of roots to keep in history
+    uint256 public constant MAX_ROOT_HISTORY = 100;
 
     // =============================================================================
     // State Variables
@@ -58,9 +68,35 @@ contract ActivityModule is
     /// @notice Description/label for current epoch
     string public currentEpochLabel;
 
+    /// @notice Pending Merkle root (waiting for delay period)
+    bytes32 public pendingRoot;
+
+    /// @notice Timestamp when pending root becomes effective
+    uint256 public pendingRootEffectiveTime;
+
+    /// @notice Pending epoch number
+    uint256 public pendingEpoch;
+
+    /// @notice Pending epoch label
+    string public pendingEpochLabel;
+
     // =============================================================================
     // Events
     // =============================================================================
+
+    event MerkleRootQueued(
+        bytes32 indexed newRoot,
+        uint256 epoch,
+        string label,
+        uint256 effectiveTime
+    );
+
+    event MerkleRootActivated(
+        bytes32 indexed oldRoot,
+        bytes32 indexed newRoot,
+        uint256 epoch,
+        uint256 timestamp
+    );
 
     event MerkleRootUpdated(
         bytes32 indexed oldRoot,
@@ -88,6 +124,17 @@ contract ActivityModule is
     error NothingToClaim();
     error MerkleRootNotSet();
     error ClaimExceedsMerkleAmount(uint256 claimed, uint256 merkleAmount);
+    error ArrayLengthMismatch();
+    error BatchTooLarge(uint256 size, uint256 max);
+    error IndexOutOfBounds(uint256 index, uint256 length);
+    error PendingRootNotReady(uint256 currentTime, uint256 effectiveTime);
+    error NoPendingRoot();
+
+    // =============================================================================
+    // Additional Events
+    // =============================================================================
+
+    event UserClaimedReset(address indexed user, uint256 previousAmount, uint256 newAmount, address indexed admin);
 
     // =============================================================================
     // Constructor & Initializer
@@ -196,6 +243,7 @@ contract ActivityModule is
 
     /// @notice Get root at specific index
     function getRootAt(uint256 index) external view returns (bytes32 root, uint256 timestamp) {
+        if (index >= rootHistory.length) revert IndexOutOfBounds(index, rootHistory.length);
         root = rootHistory[index];
         timestamp = rootTimestamp[root];
     }
@@ -262,9 +310,10 @@ contract ActivityModule is
         if (merkleRoot == bytes32(0)) revert MerkleRootNotSet();
 
         uint256 len = users.length;
-        require(len == totalEarnedAmounts.length && len == proofs.length, "Length mismatch");
+        if (len != totalEarnedAmounts.length || len != proofs.length) revert ArrayLengthMismatch();
+        if (len > MAX_BATCH_SIZE) revert BatchTooLarge(len, MAX_BATCH_SIZE);
 
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             address user = users[i];
             uint256 totalEarned = totalEarnedAmounts[i];
             bytes32[] calldata proof = proofs[i];
@@ -273,6 +322,7 @@ contract ActivityModule is
             bytes32 leaf = _computeLeaf(user, totalEarned);
             if (!MerkleProof.verify(proof, merkleRoot, leaf)) {
                 emit BatchClaimSkipped(user, "InvalidProof");
+                unchecked { ++i; }
                 continue;
             }
 
@@ -280,6 +330,7 @@ contract ActivityModule is
             uint256 alreadyClaimed = claimedPoints[user];
             if (totalEarned <= alreadyClaimed) {
                 emit BatchClaimSkipped(user, "NothingToClaim");
+                unchecked { ++i; }
                 continue;
             }
 
@@ -287,6 +338,7 @@ contract ActivityModule is
             claimedPoints[user] = totalEarned;
 
             emit PointsClaimed(user, toClaim, totalEarned, currentEpoch);
+            unchecked { ++i; }
         }
     }
 
@@ -294,37 +346,89 @@ contract ActivityModule is
     // Keeper Functions
     // =============================================================================
 
-    /// @notice Internal function to update Merkle root
-    function _updateRoot(bytes32 newRoot, uint256 epoch, string calldata label) internal {
+    /// @notice Internal function to activate a pending root
+    function _activateRoot() internal {
         bytes32 oldRoot = merkleRoot;
-        merkleRoot = newRoot;
+        merkleRoot = pendingRoot;
 
-        rootHistory.push(newRoot);
-        rootTimestamp[newRoot] = block.timestamp;
+        // Limit root history growth
+        if (rootHistory.length >= MAX_ROOT_HISTORY) {
+            // Delete oldest root timestamp to free storage
+            delete rootTimestamp[rootHistory[0]];
+            // Shift array (gas intensive but maintains history order)
+            for (uint256 i = 0; i < rootHistory.length - 1; ) {
+                rootHistory[i] = rootHistory[i + 1];
+                unchecked { ++i; }
+            }
+            rootHistory.pop();
+        }
 
-        currentEpoch = epoch;
-        currentEpochLabel = label;
+        rootHistory.push(pendingRoot);
+        rootTimestamp[pendingRoot] = block.timestamp;
 
-        emit MerkleRootUpdated(oldRoot, newRoot, epoch, label, block.timestamp);
+        currentEpoch = pendingEpoch;
+        currentEpochLabel = pendingEpochLabel;
+
+        emit MerkleRootActivated(oldRoot, pendingRoot, pendingEpoch, block.timestamp);
+        emit MerkleRootUpdated(oldRoot, pendingRoot, pendingEpoch, pendingEpochLabel, block.timestamp);
+
+        // Clear pending state
+        pendingRoot = bytes32(0);
+        pendingRootEffectiveTime = 0;
     }
 
-    /// @notice Update Merkle root (weekly update by keeper)
+    /// @notice Queue a new Merkle root (will be effective after ROOT_DELAY)
     /// @param newRoot New Merkle root
-    /// @param label Description of this epoch (e.g., "Week 1", "2024-W01")
+    /// @param label Description of this epoch
     function updateMerkleRoot(
         bytes32 newRoot,
         string calldata label
     ) external onlyRole(KEEPER_ROLE) {
-        _updateRoot(newRoot, currentEpoch + 1, label);
+        // If there's a pending root that's ready, activate it first
+        if (pendingRoot != bytes32(0) && block.timestamp >= pendingRootEffectiveTime) {
+            _activateRoot();
+        }
+
+        pendingRoot = newRoot;
+        pendingEpoch = currentEpoch + 1;
+        pendingEpochLabel = label;
+        pendingRootEffectiveTime = block.timestamp + ROOT_DELAY;
+
+        emit MerkleRootQueued(newRoot, pendingEpoch, label, pendingRootEffectiveTime);
     }
 
-    /// @notice Update Merkle root with epoch number (for precise control)
+    /// @notice Queue Merkle root with specific epoch number
     function updateMerkleRootWithEpoch(
         bytes32 newRoot,
         uint256 epoch,
         string calldata label
     ) external onlyRole(KEEPER_ROLE) {
-        _updateRoot(newRoot, epoch, label);
+        if (pendingRoot != bytes32(0) && block.timestamp >= pendingRootEffectiveTime) {
+            _activateRoot();
+        }
+
+        pendingRoot = newRoot;
+        pendingEpoch = epoch;
+        pendingEpochLabel = label;
+        pendingRootEffectiveTime = block.timestamp + ROOT_DELAY;
+
+        emit MerkleRootQueued(newRoot, epoch, label, pendingRootEffectiveTime);
+    }
+
+    /// @notice Activate a pending root after the delay period
+    function activateRoot() external {
+        if (pendingRoot == bytes32(0)) revert NoPendingRoot();
+        if (block.timestamp < pendingRootEffectiveTime) {
+            revert PendingRootNotReady(block.timestamp, pendingRootEffectiveTime);
+        }
+        _activateRoot();
+    }
+
+    /// @notice Emergency: Immediately activate root (admin only, bypass delay)
+    /// @dev Use only in emergencies where delay would cause issues
+    function emergencyActivateRoot() external onlyRole(ADMIN_ROLE) {
+        if (pendingRoot == bytes32(0)) revert NoPendingRoot();
+        _activateRoot();
     }
 
     // =============================================================================
@@ -340,7 +444,9 @@ contract ActivityModule is
     /// @notice Emergency: Reset a user's claimed amount (admin only)
     /// @dev Use with caution, only for fixing errors
     function resetUserClaimed(address user, uint256 newAmount) external onlyRole(ADMIN_ROLE) {
+        uint256 previousAmount = claimedPoints[user];
         claimedPoints[user] = newAmount;
+        emit UserClaimedReset(user, previousAmount, newAmount, msg.sender);
     }
 
     function pause() external onlyRole(ADMIN_ROLE) {
@@ -350,4 +456,17 @@ contract ActivityModule is
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
+
+    /// @notice Get contract version
+    /// @return Version string
+    function version() external pure returns (string memory) {
+        return VERSION;
+    }
+
+    // =============================================================================
+    // Storage Gap - Reserved for future upgrades
+    // =============================================================================
+
+    /// @dev Reserved storage space to allow for layout changes in future upgrades
+    uint256[50] private __gap;
 }

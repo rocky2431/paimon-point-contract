@@ -34,6 +34,13 @@ contract LPModule is
     uint256 public constant MULTIPLIER_BASE = 100; // 100 = 1x, 200 = 2x
     uint256 public constant MAX_MULTIPLIER = 1000; // 10x maximum multiplier
     string public constant MODULE_NAME = "LP Providing";
+    string public constant VERSION = "1.2.0";
+
+    /// @notice Maximum batch size for user checkpoints
+    uint256 public constant MAX_BATCH_USERS = 25;
+
+    /// @notice Maximum total operations per batch (users * pools)
+    uint256 public constant MAX_OPERATIONS_PER_BATCH = 200;
 
     // =============================================================================
     // Data Structures
@@ -117,6 +124,8 @@ contract LPModule is
     event ModuleActiveStatusUpdated(bool active);
     event LPModuleUpgraded(address indexed newImplementation, uint256 timestamp);
     event CheckpointPoolSkipped(uint256 indexed poolId, string reason);
+    event PoolNameUpdated(uint256 indexed poolId, string oldName, string newName);
+    event LPTokenQueryFailed(uint256 indexed poolId, address indexed lpToken);
 
     // =============================================================================
     // Errors
@@ -128,6 +137,9 @@ contract LPModule is
     error PoolNotFoundByToken(address lpToken);
     error MaxPoolsReached();
     error InvalidMultiplier();
+    error BatchTooLarge(uint256 size, uint256 max);
+    error TooManyOperations(uint256 operations, uint256 max);
+    error LPTokenCallFailed(uint256 poolId, address lpToken);
 
     // =============================================================================
     // Constructor & Initializer
@@ -178,13 +190,21 @@ contract LPModule is
     // =============================================================================
 
     /// @notice Calculate current points per LP for a pool
+    /// @dev Uses try-catch to handle LP token failures gracefully
     function _getPoolPointsPerLp(uint256 poolId) internal view returns (uint256) {
         PoolConfig storage pool = pools[poolId];
         PoolState storage state = poolStates[poolId];
 
         if (!pool.isActive || !active) return state.pointsPerLpStored;
 
-        uint256 totalLp = IERC20(pool.lpToken).totalSupply();
+        uint256 totalLp;
+        try IERC20(pool.lpToken).totalSupply() returns (uint256 supply) {
+            totalLp = supply;
+        } catch {
+            // LP token call failed, return stored value
+            return state.pointsPerLpStored;
+        }
+
         if (totalLp == 0) return state.pointsPerLpStored;
 
         uint256 timeDelta = block.timestamp - state.lastUpdateTime;
@@ -205,6 +225,7 @@ contract LPModule is
     }
 
     /// @notice Update user state for a pool
+    /// @dev Uses try-catch to handle LP token failures gracefully
     function _updateUserPool(address user, uint256 poolId) internal {
         PoolConfig storage pool = pools[poolId];
         UserPoolState storage userState = userPoolStates[user][poolId];
@@ -220,8 +241,16 @@ contract LPModule is
             userState.pointsEarned += newEarned;
         }
 
-        // Update user state
-        uint256 currentBalance = IERC20(pool.lpToken).balanceOf(user);
+        // Update user state with try-catch for LP token call
+        uint256 currentBalance;
+        try IERC20(pool.lpToken).balanceOf(user) returns (uint256 balance) {
+            currentBalance = balance;
+        } catch {
+            // LP token call failed, keep last balance
+            currentBalance = lastBalance;
+            emit LPTokenQueryFailed(poolId, pool.lpToken);
+        }
+
         userState.pointsPerLpPaid = cachedPointsPerLp;
         userState.lastBalance = currentBalance;
         userState.lastCheckpoint = block.timestamp;
@@ -255,8 +284,9 @@ contract LPModule is
     /// @notice Get total points for a user across all pools
     function getPoints(address user) external view override returns (uint256 total) {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             total += _getUserPoolPoints(user, i);
+            unchecked { ++i; }
         }
     }
 
@@ -292,16 +322,26 @@ contract LPModule is
             uint256 pointsPerLp
         )
     {
+        if (poolId >= pools.length) revert PoolNotFound(poolId);
+
         PoolConfig storage pool = pools[poolId];
         lpToken = pool.lpToken;
         multiplier = pool.multiplier;
         poolActive = pool.isActive;
         name = pool.name;
-        totalSupply = IERC20(pool.lpToken).totalSupply();
+
+        // Safe ERC20 call with try-catch
+        try IERC20(pool.lpToken).totalSupply() returns (uint256 supply) {
+            totalSupply = supply;
+        } catch {
+            totalSupply = 0;
+        }
+
         pointsPerLp = _getPoolPointsPerLp(poolId);
     }
 
     /// @notice Get user's points breakdown by pool
+    /// @dev Uses try-catch for LP token calls to prevent DoS
     function getUserPoolBreakdown(address user)
         external
         view
@@ -318,11 +358,19 @@ contract LPModule is
         balances = new uint256[](len);
         multipliers = new uint256[](len);
 
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             names[i] = pools[i].name;
             points[i] = _getUserPoolPoints(user, i);
-            balances[i] = IERC20(pools[i].lpToken).balanceOf(user);
             multipliers[i] = pools[i].multiplier;
+
+            // Safe ERC20 call
+            try IERC20(pools[i].lpToken).balanceOf(user) returns (uint256 balance) {
+                balances[i] = balance;
+            } catch {
+                balances[i] = 0;
+            }
+
+            unchecked { ++i; }
         }
     }
 
@@ -337,8 +385,17 @@ contract LPModule is
             uint256 lastCheckpointTime
         )
     {
+        if (poolId >= pools.length) revert PoolNotFound(poolId);
+
         UserPoolState storage userState = userPoolStates[user][poolId];
-        balance = IERC20(pools[poolId].lpToken).balanceOf(user);
+
+        // Safe ERC20 call
+        try IERC20(pools[poolId].lpToken).balanceOf(user) returns (uint256 bal) {
+            balance = bal;
+        } catch {
+            balance = 0;
+        }
+
         lastCheckpointBalance = userState.lastBalance;
         earnedPoints = _getUserPoolPoints(user, poolId);
         lastCheckpointTime = userState.lastCheckpoint;
@@ -354,7 +411,13 @@ contract LPModule is
         PoolConfig storage pool = pools[poolId];
         if (!pool.isActive) return 0;
 
-        uint256 totalSupply = IERC20(pool.lpToken).totalSupply();
+        uint256 totalSupply;
+        try IERC20(pool.lpToken).totalSupply() returns (uint256 supply) {
+            totalSupply = supply;
+        } catch {
+            return 0;
+        }
+
         if (totalSupply == 0) return 0;
 
         uint256 effectiveRate = (basePointsRatePerSecond * pool.multiplier) / MULTIPLIER_BASE;
@@ -418,7 +481,32 @@ contract LPModule is
     /// @notice Update pool name
     function updatePoolName(uint256 poolId, string calldata name) external onlyRole(ADMIN_ROLE) {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
+        string memory oldName = pools[poolId].name;
         pools[poolId].name = name;
+        emit PoolNameUpdated(poolId, oldName, name);
+    }
+
+    /// @notice Remove a pool (marks as inactive and clears mapping)
+    /// @dev Does not delete from array to preserve poolId stability
+    /// @param poolId Pool ID to remove
+    function removePool(uint256 poolId) external onlyRole(ADMIN_ROLE) {
+        if (poolId >= pools.length) revert PoolNotFound(poolId);
+
+        PoolConfig storage pool = pools[poolId];
+        address lpToken = pool.lpToken;
+
+        // Checkpoint final state before removal
+        _updatePoolGlobal(poolId);
+
+        // Clear pool index mapping
+        poolIndex[lpToken] = 0;
+
+        // Mark pool as inactive and clear LP token (prevents future operations)
+        pool.isActive = false;
+        pool.lpToken = address(0);
+        pool.multiplier = 0;
+
+        emit PoolRemoved(poolId, lpToken);
     }
 
     // =============================================================================
@@ -428,17 +516,19 @@ contract LPModule is
     /// @notice Internal: checkpoint all pools global state
     function _checkpointAllPoolsInternal() internal {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             _updatePoolGlobal(i);
+            unchecked { ++i; }
         }
     }
 
     /// @notice Internal: checkpoint a user across all pools
     function _checkpointUser(address user) internal {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             _updatePoolGlobal(i);
             _updateUserPool(user, i);
+            unchecked { ++i; }
         }
     }
 
@@ -450,25 +540,36 @@ contract LPModule is
     /// @notice Checkpoint specific pools
     function checkpointPools(uint256[] calldata poolIds) external onlyRole(KEEPER_ROLE) {
         uint256 len = poolIds.length;
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             if (poolIds[i] < pools.length) {
                 _updatePoolGlobal(poolIds[i]);
             } else {
                 emit CheckpointPoolSkipped(poolIds[i], "PoolNotFound");
             }
+            unchecked { ++i; }
         }
     }
 
     /// @notice Checkpoint users across all pools (keeper function)
+    /// @dev Limited to MAX_BATCH_USERS to prevent gas limit issues
     function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE) {
-        _checkpointAllPoolsInternal();
+        uint256 userLen = users.length;
+        if (userLen > MAX_BATCH_USERS) revert BatchTooLarge(userLen, MAX_BATCH_USERS);
 
         uint256 poolLen = pools.length;
-        uint256 userLen = users.length;
-        for (uint256 u = 0; u < userLen; u++) {
-            for (uint256 p = 0; p < poolLen; p++) {
+        uint256 totalOps = userLen * poolLen;
+        if (totalOps > MAX_OPERATIONS_PER_BATCH) {
+            revert TooManyOperations(totalOps, MAX_OPERATIONS_PER_BATCH);
+        }
+
+        _checkpointAllPoolsInternal();
+
+        for (uint256 u = 0; u < userLen; ) {
+            for (uint256 p = 0; p < poolLen; ) {
                 _updateUserPool(users[u], p);
+                unchecked { ++p; }
             }
+            unchecked { ++u; }
         }
     }
 
@@ -496,8 +597,9 @@ contract LPModule is
     /// @notice Internal: reset all pool timestamps to now
     function _resetAllPoolTimestamps() internal {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             poolStates[i].lastUpdateTime = block.timestamp;
+            unchecked { ++i; }
         }
     }
 
@@ -529,4 +631,17 @@ contract LPModule is
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
+
+    /// @notice Get contract version
+    /// @return Version string
+    function version() external pure returns (string memory) {
+        return VERSION;
+    }
+
+    // =============================================================================
+    // Storage Gap - Reserved for future upgrades
+    // =============================================================================
+
+    /// @dev Reserved storage space to allow for layout changes in future upgrades
+    uint256[50] private __gap;
 }

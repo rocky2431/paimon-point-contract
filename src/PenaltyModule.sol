@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
@@ -19,6 +20,7 @@ contract PenaltyModule is
     Initializable,
     AccessControlUpgradeable,
     PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
     UUPSUpgradeable
 {
     // =============================================================================
@@ -30,6 +32,16 @@ contract PenaltyModule is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
     uint256 public constant BASIS_POINTS = 10000;
+    string public constant VERSION = "1.2.0";
+
+    /// @notice Maximum batch size for penalty sync
+    uint256 public constant MAX_BATCH_SIZE = 100;
+
+    /// @notice Time delay before a new penalty root becomes effective (anti-frontrun)
+    uint256 public constant ROOT_DELAY = 24 hours;
+
+    /// @notice Maximum number of roots to keep in history
+    uint256 public constant MAX_ROOT_HISTORY = 100;
 
     // =============================================================================
     // State Variables
@@ -55,9 +67,27 @@ contract PenaltyModule is
     /// @notice Current epoch number
     uint256 public currentEpoch;
 
+    /// @notice Pending penalty root (waiting for delay period)
+    bytes32 public pendingRoot;
+
+    /// @notice Timestamp when pending root becomes effective
+    uint256 public pendingRootEffectiveTime;
+
     // =============================================================================
     // Events
     // =============================================================================
+
+    event PenaltyRootQueued(
+        bytes32 indexed newRoot,
+        uint256 effectiveTime
+    );
+
+    event PenaltyRootActivated(
+        bytes32 indexed oldRoot,
+        bytes32 indexed newRoot,
+        uint256 epoch,
+        uint256 timestamp
+    );
 
     event PenaltyRootUpdated(
         bytes32 indexed oldRoot,
@@ -83,6 +113,10 @@ contract PenaltyModule is
     error InvalidProof();
     error PenaltyRootNotSet();
     error InvalidPenaltyRate();
+    error ArrayLengthMismatch();
+    error BatchTooLarge(uint256 size, uint256 max);
+    error PendingRootNotReady(uint256 currentTime, uint256 effectiveTime);
+    error NoPendingRoot();
 
     // =============================================================================
     // Constructor & Initializer
@@ -109,6 +143,7 @@ contract PenaltyModule is
 
         __AccessControl_init();
         __Pausable_init();
+        __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
 
         penaltyRateBps = _penaltyRateBps;
@@ -195,7 +230,7 @@ contract PenaltyModule is
         address user,
         uint256 totalPenalty,
         bytes32[] calldata proof
-    ) external whenNotPaused {
+    ) external nonReentrant whenNotPaused {
         if (penaltyRoot == bytes32(0)) revert PenaltyRootNotSet();
 
         // Verify proof
@@ -225,9 +260,10 @@ contract PenaltyModule is
         if (penaltyRoot == bytes32(0)) revert PenaltyRootNotSet();
 
         uint256 len = users.length;
-        require(len == totalPenalties.length && len == proofs.length, "Length mismatch");
+        if (len != totalPenalties.length || len != proofs.length) revert ArrayLengthMismatch();
+        if (len > MAX_BATCH_SIZE) revert BatchTooLarge(len, MAX_BATCH_SIZE);
 
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             address user = users[i];
             uint256 totalPenalty = totalPenalties[i];
             bytes32[] calldata proof = proofs[i];
@@ -236,6 +272,7 @@ contract PenaltyModule is
             bytes32 leaf = _computeLeaf(user, totalPenalty);
             if (!MerkleProof.verify(proof, penaltyRoot, leaf)) {
                 emit BatchSyncSkipped(user, "InvalidProof");
+                unchecked { ++i; }
                 continue;
             }
 
@@ -248,6 +285,7 @@ contract PenaltyModule is
             } else {
                 emit BatchSyncSkipped(user, "PenaltyNotHigher");
             }
+            unchecked { ++i; }
         }
     }
 
@@ -255,17 +293,61 @@ contract PenaltyModule is
     // Keeper Functions
     // =============================================================================
 
-    /// @notice Update penalty Merkle root
-    /// @param newRoot New Merkle root
-    function updatePenaltyRoot(bytes32 newRoot) external onlyRole(KEEPER_ROLE) {
+    /// @notice Internal function to activate a pending root
+    function _activateRoot() internal {
         bytes32 oldRoot = penaltyRoot;
-        penaltyRoot = newRoot;
+        penaltyRoot = pendingRoot;
 
-        rootHistory.push(newRoot);
-        rootTimestamp[newRoot] = block.timestamp;
+        // Limit root history growth
+        if (rootHistory.length >= MAX_ROOT_HISTORY) {
+            // Delete oldest root timestamp to free storage
+            delete rootTimestamp[rootHistory[0]];
+            // Shift array (gas intensive but maintains history order)
+            for (uint256 i = 0; i < rootHistory.length - 1; ) {
+                rootHistory[i] = rootHistory[i + 1];
+                unchecked { ++i; }
+            }
+            rootHistory.pop();
+        }
+
+        rootHistory.push(pendingRoot);
+        rootTimestamp[pendingRoot] = block.timestamp;
         currentEpoch++;
 
-        emit PenaltyRootUpdated(oldRoot, newRoot, currentEpoch, block.timestamp);
+        emit PenaltyRootActivated(oldRoot, pendingRoot, currentEpoch, block.timestamp);
+        emit PenaltyRootUpdated(oldRoot, pendingRoot, currentEpoch, block.timestamp);
+
+        // Clear pending state
+        pendingRoot = bytes32(0);
+        pendingRootEffectiveTime = 0;
+    }
+
+    /// @notice Queue a new penalty root (will be effective after ROOT_DELAY)
+    function updatePenaltyRoot(bytes32 newRoot) external onlyRole(KEEPER_ROLE) {
+        // If there's a pending root that's ready, activate it first
+        if (pendingRoot != bytes32(0) && block.timestamp >= pendingRootEffectiveTime) {
+            _activateRoot();
+        }
+
+        pendingRoot = newRoot;
+        pendingRootEffectiveTime = block.timestamp + ROOT_DELAY;
+
+        emit PenaltyRootQueued(newRoot, pendingRootEffectiveTime);
+    }
+
+    /// @notice Activate a pending root after the delay period
+    function activateRoot() external {
+        if (pendingRoot == bytes32(0)) revert NoPendingRoot();
+        if (block.timestamp < pendingRootEffectiveTime) {
+            revert PendingRootNotReady(block.timestamp, pendingRootEffectiveTime);
+        }
+        _activateRoot();
+    }
+
+    /// @notice Emergency: Immediately activate root (admin only, bypass delay)
+    function emergencyActivateRoot() external onlyRole(ADMIN_ROLE) {
+        if (pendingRoot == bytes32(0)) revert NoPendingRoot();
+        _activateRoot();
     }
 
     // =============================================================================
@@ -298,13 +380,15 @@ contract PenaltyModule is
         uint256[] calldata penalties
     ) external onlyRole(ADMIN_ROLE) {
         uint256 len = users.length;
-        require(len == penalties.length, "Length mismatch");
+        if (len != penalties.length) revert ArrayLengthMismatch();
+        if (len > MAX_BATCH_SIZE) revert BatchTooLarge(len, MAX_BATCH_SIZE);
 
-        for (uint256 i = 0; i < len; i++) {
+        for (uint256 i = 0; i < len; ) {
             uint256 previousPenalty = confirmedPenalty[users[i]];
             confirmedPenalty[users[i]] = penalties[i];
 
             emit PenaltyConfirmed(users[i], previousPenalty, penalties[i], currentEpoch);
+            unchecked { ++i; }
         }
     }
 
@@ -315,4 +399,17 @@ contract PenaltyModule is
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
+
+    /// @notice Get contract version
+    /// @return Version string
+    function version() external pure returns (string memory) {
+        return VERSION;
+    }
+
+    // =============================================================================
+    // Storage Gap - Reserved for future upgrades
+    // =============================================================================
+
+    /// @dev Reserved storage space to allow for layout changes in future upgrades
+    uint256[50] private __gap;
 }
