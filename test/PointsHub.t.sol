@@ -30,11 +30,7 @@ contract PointsHubTest is BaseTest {
 
     function test_revert_initializeWithZeroAddress() public {
         PointsHub impl = new PointsHub();
-        bytes memory hubData = abi.encodeWithSelector(
-            PointsHub.initialize.selector,
-            address(0),
-            upgrader
-        );
+        bytes memory hubData = abi.encodeWithSelector(PointsHub.initialize.selector, address(0), upgrader);
         vm.expectRevert(PointsHub.ZeroAddress.selector);
         new ERC1967Proxy(address(impl), hubData);
     }
@@ -124,13 +120,8 @@ contract PointsHubTest is BaseTest {
         holdingModule.checkpointUsers(toArray(user1));
         _advanceTime(1 days);
 
-        (
-            string[] memory names,
-            uint256[] memory points,
-            uint256 penalty,
-            uint256 redeemed,
-            uint256 claimable
-        ) = pointsHub.getPointsBreakdown(user1);
+        (string[] memory names, uint256[] memory points, uint256 penalty, uint256 redeemed, uint256 claimable) =
+            pointsHub.getPointsBreakdown(user1);
 
         assertEq(names.length, 3);
         assertEq(names[0], "PPT Holding");

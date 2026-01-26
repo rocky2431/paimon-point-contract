@@ -83,30 +83,12 @@ contract PenaltyModule is
     // Events
     // =============================================================================
 
-    event PenaltyRootQueued(
-        bytes32 indexed newRoot,
-        uint256 effectiveTime
-    );
+    event PenaltyRootQueued(bytes32 indexed newRoot, uint256 effectiveTime);
 
-    event PenaltyRootActivated(
-        bytes32 indexed oldRoot,
-        bytes32 indexed newRoot,
-        uint256 epoch,
-        uint256 timestamp
-    );
+    event PenaltyRootActivated(bytes32 indexed oldRoot, bytes32 indexed newRoot, uint256 epoch, uint256 timestamp);
 
-    event PenaltyRootUpdated(
-        bytes32 indexed oldRoot,
-        bytes32 indexed newRoot,
-        uint256 epoch,
-        uint256 timestamp
-    );
-    event PenaltyConfirmed(
-        address indexed user,
-        uint256 previousPenalty,
-        uint256 newPenalty,
-        uint256 epoch
-    );
+    event PenaltyRootUpdated(bytes32 indexed oldRoot, bytes32 indexed newRoot, uint256 epoch, uint256 timestamp);
+    event PenaltyConfirmed(address indexed user, uint256 previousPenalty, uint256 newPenalty, uint256 epoch);
     event PenaltyRateUpdated(uint256 oldRate, uint256 newRate);
     event PenaltyModuleUpgraded(address indexed newImplementation, uint256 timestamp);
     event BatchSyncSkipped(address indexed user, string reason);
@@ -141,12 +123,7 @@ contract PenaltyModule is
     /// @param keeper Keeper address
     /// @param upgrader Upgrader address
     /// @param _penaltyRateBps Initial penalty rate in basis points
-    function initialize(
-        address admin,
-        address keeper,
-        address upgrader,
-        uint256 _penaltyRateBps
-    ) external initializer {
+    function initialize(address admin, address keeper, address upgrader, uint256 _penaltyRateBps) external initializer {
         if (admin == address(0) || keeper == address(0) || upgrader == address(0)) revert ZeroAddress();
         if (_penaltyRateBps > BASIS_POINTS) revert InvalidPenaltyRate();
 
@@ -203,11 +180,11 @@ contract PenaltyModule is
     /// @param totalPenalty Total cumulative penalty
     /// @param proof Merkle proof
     /// @return valid Whether proof is valid
-    function verifyPenalty(
-        address user,
-        uint256 totalPenalty,
-        bytes32[] calldata proof
-    ) public view returns (bool valid) {
+    function verifyPenalty(address user, uint256 totalPenalty, bytes32[] calldata proof)
+        public
+        view
+        returns (bool valid)
+    {
         if (penaltyRoot == bytes32(0)) return false;
 
         bytes32 leaf = _computeLeaf(user, totalPenalty);
@@ -235,11 +212,11 @@ contract PenaltyModule is
     /// @param user User address
     /// @param totalPenalty Total cumulative penalty from Merkle tree
     /// @param proof Merkle proof
-    function syncPenalty(
-        address user,
-        uint256 totalPenalty,
-        bytes32[] calldata proof
-    ) external nonReentrant whenNotPaused {
+    function syncPenalty(address user, uint256 totalPenalty, bytes32[] calldata proof)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         if (penaltyRoot == bytes32(0)) revert PenaltyRootNotSet();
 
         // Verify proof
@@ -261,18 +238,18 @@ contract PenaltyModule is
     /// @param users Array of user addresses
     /// @param totalPenalties Array of total penalties
     /// @param proofs Array of Merkle proofs
-    function batchSyncPenalty(
-        address[] calldata users,
-        uint256[] calldata totalPenalties,
-        bytes32[][] calldata proofs
-    ) external onlyRole(KEEPER_ROLE) whenNotPaused {
+    function batchSyncPenalty(address[] calldata users, uint256[] calldata totalPenalties, bytes32[][] calldata proofs)
+        external
+        onlyRole(KEEPER_ROLE)
+        whenNotPaused
+    {
         if (penaltyRoot == bytes32(0)) revert PenaltyRootNotSet();
 
         uint256 len = users.length;
         if (len != totalPenalties.length || len != proofs.length) revert ArrayLengthMismatch();
         if (len > MAX_BATCH_SIZE) revert BatchTooLarge(len, MAX_BATCH_SIZE);
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             address user = users[i];
             uint256 totalPenalty = totalPenalties[i];
             bytes32[] calldata proof = proofs[i];
@@ -281,7 +258,9 @@ contract PenaltyModule is
             bytes32 leaf = _computeLeaf(user, totalPenalty);
             if (!MerkleProof.verify(proof, penaltyRoot, leaf)) {
                 emit BatchSyncSkipped(user, "InvalidProof");
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
                 continue;
             }
 
@@ -294,7 +273,9 @@ contract PenaltyModule is
             } else {
                 emit BatchSyncSkipped(user, "PenaltyNotHigher");
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -404,20 +385,19 @@ contract PenaltyModule is
     }
 
     /// @notice Batch set penalties (admin function for migration/fixing)
-    function batchSetPenalties(
-        address[] calldata users,
-        uint256[] calldata penalties
-    ) external onlyRole(ADMIN_ROLE) {
+    function batchSetPenalties(address[] calldata users, uint256[] calldata penalties) external onlyRole(ADMIN_ROLE) {
         uint256 len = users.length;
         if (len != penalties.length) revert ArrayLengthMismatch();
         if (len > MAX_BATCH_SIZE) revert BatchTooLarge(len, MAX_BATCH_SIZE);
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             uint256 previousPenalty = confirmedPenalty[users[i]];
             confirmedPenalty[users[i]] = penalties[i];
 
             emit PenaltyConfirmed(users[i], previousPenalty, penalties[i], currentEpoch);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 

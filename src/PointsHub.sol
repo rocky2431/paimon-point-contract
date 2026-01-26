@@ -92,12 +92,7 @@ contract PointsHub is
     event ExchangeRateUpdated(uint256 oldRate, uint256 newRate);
     event RedeemStatusUpdated(bool enabled);
     event MaxRedeemPerTxUpdated(uint256 oldMax, uint256 newMax);
-    event PointsRedeemed(
-        address indexed user,
-        uint256 pointsAmount,
-        uint256 tokenAmount,
-        uint256 totalRedeemed
-    );
+    event PointsRedeemed(address indexed user, uint256 pointsAmount, uint256 tokenAmount, uint256 totalRedeemed);
     event PointsHubUpgraded(address indexed newImplementation, uint256 timestamp);
     event ModuleGasLimitUpdated(uint256 oldLimit, uint256 newLimit);
 
@@ -169,13 +164,12 @@ contract PointsHub is
         uint256 len = modules.length;
         uint256 gasLimit = moduleGasLimit > 0 ? moduleGasLimit : DEFAULT_MODULE_GAS_LIMIT;
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             address moduleAddr = address(modules[i]);
 
             // Check if module is active with gas limit
-            (bool successActive, bytes memory dataActive) = moduleAddr.staticcall{gas: gasLimit}(
-                abi.encodeWithSelector(IPointsModule.isActive.selector)
-            );
+            (bool successActive, bytes memory dataActive) =
+                moduleAddr.staticcall{gas: gasLimit}(abi.encodeWithSelector(IPointsModule.isActive.selector));
 
             if (successActive && dataActive.length >= 32) {
                 bool isActiveFlag = abi.decode(dataActive, (bool));
@@ -194,7 +188,9 @@ contract PointsHub is
             }
             // If isActive call failed, skip module
 
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -203,21 +199,16 @@ contract PointsHub is
     /// @param user The user address
     /// @return total Total points from successful modules
     /// @return moduleSuccess Array indicating success status for each module
-    function getTotalPointsWithStatus(address user)
-        public
-        view
-        returns (uint256 total, bool[] memory moduleSuccess)
-    {
+    function getTotalPointsWithStatus(address user) public view returns (uint256 total, bool[] memory moduleSuccess) {
         uint256 len = modules.length;
         moduleSuccess = new bool[](len);
         uint256 gasLimit = moduleGasLimit > 0 ? moduleGasLimit : DEFAULT_MODULE_GAS_LIMIT;
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             address moduleAddr = address(modules[i]);
 
-            (bool successActive, bytes memory dataActive) = moduleAddr.staticcall{gas: gasLimit}(
-                abi.encodeWithSelector(IPointsModule.isActive.selector)
-            );
+            (bool successActive, bytes memory dataActive) =
+                moduleAddr.staticcall{gas: gasLimit}(abi.encodeWithSelector(IPointsModule.isActive.selector));
 
             if (successActive && dataActive.length >= 32) {
                 bool isActiveFlag = abi.decode(dataActive, (bool));
@@ -237,7 +228,9 @@ contract PointsHub is
             }
             // moduleSuccess[i] remains false if isActive call failed
 
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -279,19 +272,13 @@ contract PointsHub is
     function getPointsBreakdown(address user)
         external
         view
-        returns (
-            string[] memory names,
-            uint256[] memory points,
-            uint256 penalty,
-            uint256 redeemed,
-            uint256 claimable
-        )
+        returns (string[] memory names, uint256[] memory points, uint256 penalty, uint256 redeemed, uint256 claimable)
     {
         uint256 len = modules.length;
         names = new string[](len);
         points = new uint256[](len);
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             try modules[i].moduleName() returns (string memory name) {
                 names[i] = name;
             } catch {
@@ -309,7 +296,9 @@ contract PointsHub is
             } catch {
                 points[i] = 0;
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         penalty = getPenaltyPoints(user);
@@ -344,9 +333,11 @@ contract PointsHub is
     function getAllModules() external view returns (address[] memory) {
         uint256 len = modules.length;
         address[] memory result = new address[](len);
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             result[i] = address(modules[i]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         return result;
     }
@@ -416,9 +407,12 @@ contract PointsHub is
         }
 
         // Verify getPoints and isActive are callable
-        try IPointsModule(module).isActive() returns (bool) {
-            // Valid
-        } catch {
+        try IPointsModule(module).isActive() returns (
+            bool
+        ) {
+        // Valid
+        }
+        catch {
             revert InvalidModuleInterface(module);
         }
 
@@ -435,12 +429,14 @@ contract PointsHub is
 
         uint256 len = modules.length;
         uint256 indexToRemove;
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             if (address(modules[i]) == module) {
                 indexToRemove = i;
                 break;
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         // Swap with last and pop
@@ -476,9 +472,12 @@ contract PointsHub is
         // Allow setting to address(0) to disable penalty module
         if (_penaltyModule != address(0)) {
             // Verify the module implements IPenaltyModule interface
-            try IPenaltyModule(_penaltyModule).getPenalty(address(0)) returns (uint256) {
-                // Valid interface
-            } catch {
+            try IPenaltyModule(_penaltyModule).getPenalty(address(0)) returns (
+                uint256
+            ) {
+            // Valid interface
+            }
+            catch {
                 revert InvalidPenaltyModuleInterface(_penaltyModule);
             }
         }

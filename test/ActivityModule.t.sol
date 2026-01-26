@@ -160,7 +160,7 @@ contract ActivityModuleTest is BaseTest {
         amounts[0] = 1000 * 1e18;
         amounts[1] = 500 * 1e18;
 
-        (bytes32 root, ) = _generateMerkleProof(user1, amounts[0], users, amounts);
+        (bytes32 root,) = _generateMerkleProof(user1, amounts[0], users, amounts);
 
         _setActivityMerkleRoot(root, "Test");
 

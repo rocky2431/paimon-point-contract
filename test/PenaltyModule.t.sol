@@ -168,7 +168,7 @@ contract PenaltyModuleTest is BaseTest {
         amounts[0] = 100 * 1e18;
         amounts[1] = 50 * 1e18;
 
-        (bytes32 root, ) = _generateMerkleProof(user1, amounts[0], users, amounts);
+        (bytes32 root,) = _generateMerkleProof(user1, amounts[0], users, amounts);
 
         _setPenaltyMerkleRoot(root);
 

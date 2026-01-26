@@ -217,12 +217,8 @@ contract HoldingModuleTest is BaseTest {
 
         _advanceTime(1 hours);
 
-        (
-            uint256 balance,
-            uint256 lastCheckpointBalance,
-            uint256 earnedPoints,
-            uint256 lastCheckpointTime
-        ) = holdingModule.getUserState(user1);
+        (uint256 balance, uint256 lastCheckpointBalance, uint256 earnedPoints, uint256 lastCheckpointTime) =
+            holdingModule.getUserState(user1);
 
         assertEq(balance, 1000 * 1e18);
         assertEq(lastCheckpointBalance, 1000 * 1e18);

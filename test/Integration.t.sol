@@ -217,13 +217,8 @@ contract IntegrationTest is BaseTest {
         penaltyModule.setUserPenalty(user1, 500 * 1e18);
 
         // Get breakdown
-        (
-            string[] memory names,
-            uint256[] memory points,
-            uint256 penalty,
-            uint256 redeemed,
-            uint256 claimable
-        ) = pointsHub.getPointsBreakdown(user1);
+        (string[] memory names, uint256[] memory points, uint256 penalty, uint256 redeemed, uint256 claimable) =
+            pointsHub.getPointsBreakdown(user1);
 
         assertEq(names.length, 3);
         assertGt(points[0], 0); // HoldingModule

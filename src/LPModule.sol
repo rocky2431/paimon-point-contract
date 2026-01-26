@@ -48,24 +48,24 @@ contract LPModule is
 
     /// @notice Pool configuration
     struct PoolConfig {
-        address lpToken;        // LP Token address
-        uint256 multiplier;     // Points multiplier (100 = 1x, 200 = 2x)
-        bool isActive;          // Whether pool is active
-        string name;            // Pool name for display
+        address lpToken; // LP Token address
+        uint256 multiplier; // Points multiplier (100 = 1x, 200 = 2x)
+        bool isActive; // Whether pool is active
+        string name; // Pool name for display
     }
 
     /// @notice Pool state for points calculation
     struct PoolState {
-        uint256 lastUpdateTime;     // Last update timestamp
-        uint256 pointsPerLpStored;  // Accumulated points per LP token
+        uint256 lastUpdateTime; // Last update timestamp
+        uint256 pointsPerLpStored; // Accumulated points per LP token
     }
 
     /// @notice User state per pool
     struct UserPoolState {
-        uint256 pointsPerLpPaid;    // User's last recorded points per LP
-        uint256 pointsEarned;       // User's accumulated points
-        uint256 lastBalance;        // User's last recorded LP balance
-        uint256 lastCheckpoint;     // Last checkpoint timestamp
+        uint256 pointsPerLpPaid; // User's last recorded points per LP
+        uint256 pointsEarned; // User's accumulated points
+        uint256 lastBalance; // User's last recorded LP balance
+        uint256 lastCheckpoint; // Last checkpoint timestamp
         uint256 lastCheckpointBlock; // Last checkpoint block number (for flash loan protection)
     }
 
@@ -101,29 +101,11 @@ contract LPModule is
     // Events
     // =============================================================================
 
-    event PoolAdded(
-        uint256 indexed poolId,
-        address indexed lpToken,
-        uint256 multiplier,
-        string name
-    );
-    event PoolUpdated(
-        uint256 indexed poolId,
-        uint256 multiplier,
-        bool isActive
-    );
+    event PoolAdded(uint256 indexed poolId, address indexed lpToken, uint256 multiplier, string name);
+    event PoolUpdated(uint256 indexed poolId, uint256 multiplier, bool isActive);
     event PoolRemoved(uint256 indexed poolId, address indexed lpToken);
-    event GlobalPoolCheckpointed(
-        uint256 indexed poolId,
-        uint256 pointsPerLp,
-        uint256 timestamp
-    );
-    event UserPoolCheckpointed(
-        address indexed user,
-        uint256 indexed poolId,
-        uint256 pointsEarned,
-        uint256 balance
-    );
+    event GlobalPoolCheckpointed(uint256 indexed poolId, uint256 pointsPerLp, uint256 timestamp);
+    event UserPoolCheckpointed(address indexed user, uint256 indexed poolId, uint256 pointsEarned, uint256 balance);
     event BaseRateUpdated(uint256 oldRate, uint256 newRate);
     event ModuleActiveStatusUpdated(bool active);
     event LPModuleUpgraded(address indexed newImplementation, uint256 timestamp);
@@ -160,12 +142,7 @@ contract LPModule is
     /// @param keeper Keeper address
     /// @param upgrader Upgrader address
     /// @param _baseRate Base points rate per second per LP
-    function initialize(
-        address admin,
-        address keeper,
-        address upgrader,
-        uint256 _baseRate
-    ) external initializer {
+    function initialize(address admin, address keeper, address upgrader, uint256 _baseRate) external initializer {
         if (admin == address(0) || keeper == address(0) || upgrader == address(0)) revert ZeroAddress();
 
         __AccessControl_init();
@@ -244,8 +221,7 @@ contract LPModule is
 
         // Flash loan protection: only credit points if minimum holding blocks have passed
         // This prevents attackers from borrowing tokens, checkpointing, and returning in same block
-        bool passedHoldingPeriod = lastCheckpointBlock == 0 ||
-            block.number >= lastCheckpointBlock + minHoldingBlocks;
+        bool passedHoldingPeriod = lastCheckpointBlock == 0 || block.number >= lastCheckpointBlock + minHoldingBlocks;
 
         // Calculate new earned points using last recorded balance
         // Only credit if holding period requirement is met
@@ -299,9 +275,11 @@ contract LPModule is
     /// @notice Get total points for a user across all pools
     function getPoints(address user) external view override returns (uint256 total) {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             total += _getUserPoolPoints(user, i);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -373,7 +351,7 @@ contract LPModule is
         balances = new uint256[](len);
         multipliers = new uint256[](len);
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             names[i] = pools[i].name;
             points[i] = _getUserPoolPoints(user, i);
             multipliers[i] = pools[i].multiplier;
@@ -385,7 +363,9 @@ contract LPModule is
                 balances[i] = 0;
             }
 
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -419,11 +399,11 @@ contract LPModule is
     }
 
     /// @notice Estimate points for LP amount over duration
-    function estimatePoolPoints(
-        uint256 poolId,
-        uint256 lpAmount,
-        uint256 durationSeconds
-    ) external view returns (uint256) {
+    function estimatePoolPoints(uint256 poolId, uint256 lpAmount, uint256 durationSeconds)
+        external
+        view
+        returns (uint256)
+    {
         if (poolId >= pools.length) return 0;
         PoolConfig storage pool = pools[poolId];
         if (!pool.isActive) return 0;
@@ -450,23 +430,14 @@ contract LPModule is
     /// @param lpToken LP token address
     /// @param multiplier Points multiplier (100 = 1x)
     /// @param name Pool name
-    function addPool(
-        address lpToken,
-        uint256 multiplier,
-        string calldata name
-    ) external onlyRole(ADMIN_ROLE) {
+    function addPool(address lpToken, uint256 multiplier, string calldata name) external onlyRole(ADMIN_ROLE) {
         if (lpToken == address(0)) revert ZeroAddress();
         if (poolIndex[lpToken] != 0) revert PoolAlreadyExists(lpToken);
         if (pools.length >= MAX_POOLS) revert MaxPoolsReached();
         if (multiplier == 0 || multiplier > MAX_MULTIPLIER) revert InvalidMultiplier();
 
         uint256 poolId = pools.length;
-        pools.push(PoolConfig({
-            lpToken: lpToken,
-            multiplier: multiplier,
-            isActive: true,
-            name: name
-        }));
+        pools.push(PoolConfig({lpToken: lpToken, multiplier: multiplier, isActive: true, name: name}));
 
         poolIndex[lpToken] = poolId + 1; // +1 to distinguish from "not found"
         poolStates[poolId].lastUpdateTime = block.timestamp;
@@ -478,11 +449,7 @@ contract LPModule is
     /// @param poolId Pool ID
     /// @param multiplier New multiplier
     /// @param poolActive Whether pool is active
-    function updatePool(
-        uint256 poolId,
-        uint256 multiplier,
-        bool poolActive
-    ) external onlyRole(ADMIN_ROLE) {
+    function updatePool(uint256 poolId, uint256 multiplier, bool poolActive) external onlyRole(ADMIN_ROLE) {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
         if (multiplier == 0 || multiplier > MAX_MULTIPLIER) revert InvalidMultiplier();
 
@@ -533,19 +500,23 @@ contract LPModule is
     /// @notice Internal: checkpoint all pools global state
     function _checkpointAllPoolsInternal() internal {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             _updatePoolGlobal(i);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
     /// @notice Internal: checkpoint a user across all pools
     function _checkpointUser(address user) internal {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             _updatePoolGlobal(i);
             _updateUserPool(user, i);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -557,13 +528,15 @@ contract LPModule is
     /// @notice Checkpoint specific pools
     function checkpointPools(uint256[] calldata poolIds) external onlyRole(KEEPER_ROLE) {
         uint256 len = poolIds.length;
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             if (poolIds[i] < pools.length) {
                 _updatePoolGlobal(poolIds[i]);
             } else {
                 emit CheckpointPoolSkipped(poolIds[i], "PoolNotFound");
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -581,12 +554,16 @@ contract LPModule is
 
         _checkpointAllPoolsInternal();
 
-        for (uint256 u = 0; u < userLen; ) {
-            for (uint256 p = 0; p < poolLen; ) {
+        for (uint256 u = 0; u < userLen;) {
+            for (uint256 p = 0; p < poolLen;) {
                 _updateUserPool(users[u], p);
-                unchecked { ++p; }
+                unchecked {
+                    ++p;
+                }
             }
-            unchecked { ++u; }
+            unchecked {
+                ++u;
+            }
         }
     }
 
@@ -614,9 +591,11 @@ contract LPModule is
     /// @notice Internal: reset all pool timestamps to now
     function _resetAllPoolTimestamps() internal {
         uint256 len = pools.length;
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             poolStates[i].lastUpdateTime = block.timestamp;
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 

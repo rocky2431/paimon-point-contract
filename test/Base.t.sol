@@ -51,55 +51,31 @@ abstract contract BaseTest is Test {
 
         // Deploy and initialize PointsHub
         PointsHub hubImpl = new PointsHub();
-        bytes memory hubData = abi.encodeWithSelector(
-            PointsHub.initialize.selector,
-            admin,
-            upgrader
-        );
+        bytes memory hubData = abi.encodeWithSelector(PointsHub.initialize.selector, admin, upgrader);
         pointsHub = PointsHub(address(new ERC1967Proxy(address(hubImpl), hubData)));
 
         // Deploy and initialize HoldingModule
         HoldingModule holdingImpl = new HoldingModule();
         bytes memory holdingData = abi.encodeWithSelector(
-            HoldingModule.initialize.selector,
-            address(ppt),
-            admin,
-            keeper,
-            upgrader,
-            POINTS_RATE_PER_SECOND
+            HoldingModule.initialize.selector, address(ppt), admin, keeper, upgrader, POINTS_RATE_PER_SECOND
         );
         holdingModule = HoldingModule(address(new ERC1967Proxy(address(holdingImpl), holdingData)));
 
         // Deploy and initialize LPModule
         LPModule lpImpl = new LPModule();
-        bytes memory lpData = abi.encodeWithSelector(
-            LPModule.initialize.selector,
-            admin,
-            keeper,
-            upgrader,
-            LP_BASE_RATE
-        );
+        bytes memory lpData =
+            abi.encodeWithSelector(LPModule.initialize.selector, admin, keeper, upgrader, LP_BASE_RATE);
         lpModule = LPModule(address(new ERC1967Proxy(address(lpImpl), lpData)));
 
         // Deploy and initialize ActivityModule
         ActivityModule activityImpl = new ActivityModule();
-        bytes memory activityData = abi.encodeWithSelector(
-            ActivityModule.initialize.selector,
-            admin,
-            keeper,
-            upgrader
-        );
+        bytes memory activityData = abi.encodeWithSelector(ActivityModule.initialize.selector, admin, keeper, upgrader);
         activityModule = ActivityModule(address(new ERC1967Proxy(address(activityImpl), activityData)));
 
         // Deploy and initialize PenaltyModule
         PenaltyModule penaltyImpl = new PenaltyModule();
-        bytes memory penaltyData = abi.encodeWithSelector(
-            PenaltyModule.initialize.selector,
-            admin,
-            keeper,
-            upgrader,
-            PENALTY_RATE_BPS
-        );
+        bytes memory penaltyData =
+            abi.encodeWithSelector(PenaltyModule.initialize.selector, admin, keeper, upgrader, PENALTY_RATE_BPS);
         penaltyModule = PenaltyModule(address(new ERC1967Proxy(address(penaltyImpl), penaltyData)));
 
         // Setup PointsHub - register modules
@@ -123,12 +99,11 @@ abstract contract BaseTest is Test {
     }
 
     // Helper function to generate Merkle tree for testing
-    function _generateMerkleProof(
-        address user,
-        uint256 amount,
-        address[] memory allUsers,
-        uint256[] memory allAmounts
-    ) internal pure returns (bytes32 root, bytes32[] memory proof) {
+    function _generateMerkleProof(address user, uint256 amount, address[] memory allUsers, uint256[] memory allAmounts)
+        internal
+        pure
+        returns (bytes32 root, bytes32[] memory proof)
+    {
         require(allUsers.length == allAmounts.length, "Length mismatch");
 
         // Find user index
@@ -180,9 +155,7 @@ abstract contract BaseTest is Test {
     }
 
     function _hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
-        return a < b
-            ? keccak256(abi.encodePacked(a, b))
-            : keccak256(abi.encodePacked(b, a));
+        return a < b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
     }
 
     // Helper to advance time

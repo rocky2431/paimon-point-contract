@@ -90,33 +90,14 @@ contract ActivityModule is
     // Events
     // =============================================================================
 
-    event MerkleRootQueued(
-        bytes32 indexed newRoot,
-        uint256 epoch,
-        string label,
-        uint256 effectiveTime
-    );
+    event MerkleRootQueued(bytes32 indexed newRoot, uint256 epoch, string label, uint256 effectiveTime);
 
-    event MerkleRootActivated(
-        bytes32 indexed oldRoot,
-        bytes32 indexed newRoot,
-        uint256 epoch,
-        uint256 timestamp
-    );
+    event MerkleRootActivated(bytes32 indexed oldRoot, bytes32 indexed newRoot, uint256 epoch, uint256 timestamp);
 
     event MerkleRootUpdated(
-        bytes32 indexed oldRoot,
-        bytes32 indexed newRoot,
-        uint256 epoch,
-        string label,
-        uint256 timestamp
+        bytes32 indexed oldRoot, bytes32 indexed newRoot, uint256 epoch, string label, uint256 timestamp
     );
-    event PointsClaimed(
-        address indexed user,
-        uint256 claimedAmount,
-        uint256 totalClaimed,
-        uint256 epoch
-    );
+    event PointsClaimed(address indexed user, uint256 claimedAmount, uint256 totalClaimed, uint256 epoch);
     event ModuleActiveStatusUpdated(bool active);
     event ActivityModuleUpgraded(address indexed newImplementation, uint256 timestamp);
     event BatchClaimSkipped(address indexed user, string reason);
@@ -157,11 +138,7 @@ contract ActivityModule is
     /// @param admin Admin address
     /// @param keeper Keeper address (for updating Merkle roots)
     /// @param upgrader Upgrader address
-    function initialize(
-        address admin,
-        address keeper,
-        address upgrader
-    ) external initializer {
+    function initialize(address admin, address keeper, address upgrader) external initializer {
         if (admin == address(0) || keeper == address(0) || upgrader == address(0)) revert ZeroAddress();
 
         __AccessControl_init();
@@ -229,11 +206,11 @@ contract ActivityModule is
     /// @param proof Merkle proof
     /// @return valid Whether the proof is valid
     /// @return claimable Amount that can be claimed
-    function verifyClaim(
-        address user,
-        uint256 totalEarned,
-        bytes32[] calldata proof
-    ) public view returns (bool valid, uint256 claimable) {
+    function verifyClaim(address user, uint256 totalEarned, bytes32[] calldata proof)
+        public
+        view
+        returns (bool valid, uint256 claimable)
+    {
         if (merkleRoot == bytes32(0)) return (false, 0);
 
         bytes32 leaf = _computeLeaf(user, totalEarned);
@@ -260,11 +237,7 @@ contract ActivityModule is
     /// @param user User address
     /// @return claimed Amount already claimed
     /// @return lastClaimTime Timestamp (approximated from root updates)
-    function getUserClaimStatus(address user)
-        external
-        view
-        returns (uint256 claimed, uint256 lastClaimTime)
-    {
+    function getUserClaimStatus(address user) external view returns (uint256 claimed, uint256 lastClaimTime) {
         claimed = claimedPoints[user];
         // Note: We don't track individual claim times, return root timestamp as approximation
         if (merkleRoot != bytes32(0)) {
@@ -279,10 +252,7 @@ contract ActivityModule is
     /// @notice Claim points using Merkle proof
     /// @param totalEarned Total cumulative earned points (from Merkle tree)
     /// @param proof Merkle proof
-    function claim(
-        uint256 totalEarned,
-        bytes32[] calldata proof
-    ) external nonReentrant whenNotPaused {
+    function claim(uint256 totalEarned, bytes32[] calldata proof) external nonReentrant whenNotPaused {
         if (merkleRoot == bytes32(0)) revert MerkleRootNotSet();
 
         // Verify proof
@@ -310,18 +280,18 @@ contract ActivityModule is
     /// @param users Array of user addresses
     /// @param totalEarnedAmounts Array of total earned amounts
     /// @param proofs Array of Merkle proofs
-    function batchClaim(
-        address[] calldata users,
-        uint256[] calldata totalEarnedAmounts,
-        bytes32[][] calldata proofs
-    ) external onlyRole(KEEPER_ROLE) whenNotPaused {
+    function batchClaim(address[] calldata users, uint256[] calldata totalEarnedAmounts, bytes32[][] calldata proofs)
+        external
+        onlyRole(KEEPER_ROLE)
+        whenNotPaused
+    {
         if (merkleRoot == bytes32(0)) revert MerkleRootNotSet();
 
         uint256 len = users.length;
         if (len != totalEarnedAmounts.length || len != proofs.length) revert ArrayLengthMismatch();
         if (len > MAX_BATCH_SIZE) revert BatchTooLarge(len, MAX_BATCH_SIZE);
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             address user = users[i];
             uint256 totalEarned = totalEarnedAmounts[i];
             bytes32[] calldata proof = proofs[i];
@@ -330,7 +300,9 @@ contract ActivityModule is
             bytes32 leaf = _computeLeaf(user, totalEarned);
             if (!MerkleProof.verify(proof, merkleRoot, leaf)) {
                 emit BatchClaimSkipped(user, "InvalidProof");
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
                 continue;
             }
 
@@ -338,7 +310,9 @@ contract ActivityModule is
             uint256 alreadyClaimed = claimedPoints[user];
             if (totalEarned <= alreadyClaimed) {
                 emit BatchClaimSkipped(user, "NothingToClaim");
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
                 continue;
             }
 
@@ -346,7 +320,9 @@ contract ActivityModule is
             claimedPoints[user] = totalEarned;
 
             emit PointsClaimed(user, toClaim, totalEarned, currentEpoch);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -389,10 +365,7 @@ contract ActivityModule is
     /// @notice Queue a new Merkle root (will be effective after ROOT_DELAY)
     /// @param newRoot New Merkle root
     /// @param label Description of this epoch
-    function updateMerkleRoot(
-        bytes32 newRoot,
-        string calldata label
-    ) external onlyRole(KEEPER_ROLE) {
+    function updateMerkleRoot(bytes32 newRoot, string calldata label) external onlyRole(KEEPER_ROLE) {
         // If there's a pending root that's ready, activate it first
         if (pendingRoot != bytes32(0) && block.timestamp >= pendingRootEffectiveTime) {
             _activateRoot();
@@ -407,11 +380,10 @@ contract ActivityModule is
     }
 
     /// @notice Queue Merkle root with specific epoch number
-    function updateMerkleRootWithEpoch(
-        bytes32 newRoot,
-        uint256 epoch,
-        string calldata label
-    ) external onlyRole(KEEPER_ROLE) {
+    function updateMerkleRootWithEpoch(bytes32 newRoot, uint256 epoch, string calldata label)
+        external
+        onlyRole(KEEPER_ROLE)
+    {
         if (pendingRoot != bytes32(0) && block.timestamp >= pendingRootEffectiveTime) {
             _activateRoot();
         }

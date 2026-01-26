@@ -89,12 +89,7 @@ contract HoldingModule is
     // =============================================================================
 
     event GlobalCheckpointed(uint256 pointsPerShare, uint256 timestamp, uint256 effectiveSupply);
-    event UserCheckpointed(
-        address indexed user,
-        uint256 pointsEarned,
-        uint256 balance,
-        uint256 timestamp
-    );
+    event UserCheckpointed(address indexed user, uint256 pointsEarned, uint256 balance, uint256 timestamp);
     event PointsRateUpdated(uint256 oldRate, uint256 newRate);
     event MinBalanceThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
     event ModuleActiveStatusUpdated(bool active);
@@ -131,13 +126,10 @@ contract HoldingModule is
     /// @param keeper Keeper address (for checkpoints)
     /// @param upgrader Upgrader address (typically timelock)
     /// @param _pointsRatePerSecond Initial points rate per second per PPT
-    function initialize(
-        address _ppt,
-        address admin,
-        address keeper,
-        address upgrader,
-        uint256 _pointsRatePerSecond
-    ) external initializer {
+    function initialize(address _ppt, address admin, address keeper, address upgrader, uint256 _pointsRatePerSecond)
+        external
+        initializer
+    {
         if (_ppt == address(0) || admin == address(0) || keeper == address(0) || upgrader == address(0)) {
             revert ZeroAddress();
         }
@@ -232,8 +224,7 @@ contract HoldingModule is
 
         // Flash loan protection: only credit points if minimum holding blocks have passed
         // This prevents attackers from borrowing tokens, checkpointing, and returning in same block
-        bool passedHoldingPeriod = lastCheckpointBlock == 0 ||
-            block.number >= lastCheckpointBlock + minHoldingBlocks;
+        bool passedHoldingPeriod = lastCheckpointBlock == 0 || block.number >= lastCheckpointBlock + minHoldingBlocks;
 
         // Calculate new earned points using last recorded balance
         // Only credit if holding period requirement is met
@@ -313,12 +304,7 @@ contract HoldingModule is
     function getUserState(address user)
         external
         view
-        returns (
-            uint256 balance,
-            uint256 lastCheckpointBalance,
-            uint256 earnedPoints,
-            uint256 lastCheckpointTime
-        )
+        returns (uint256 balance, uint256 lastCheckpointBalance, uint256 earnedPoints, uint256 lastCheckpointTime)
     {
         balance = ppt.balanceOf(user);
         lastCheckpointBalance = userLastBalance[user];
@@ -356,9 +342,11 @@ contract HoldingModule is
 
         _updateGlobal();
 
-        for (uint256 i = 0; i < len; ) {
+        for (uint256 i = 0; i < len;) {
             _updateUser(users[i]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 

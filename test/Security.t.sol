@@ -220,9 +220,7 @@ contract SecurityTest is BaseTest {
 
         // Try to decrease - should revert
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(PenaltyModule.PenaltyCannotDecrease.selector, 100, 50)
-        );
+        vm.expectRevert(abi.encodeWithSelector(PenaltyModule.PenaltyCannotDecrease.selector, 100, 50));
         penaltyModule.setUserPenalty(user1, 50);
     }
 
@@ -301,9 +299,7 @@ contract SecurityTest is BaseTest {
 
         // Try to redeem - should fail
         vm.prank(user1);
-        vm.expectRevert(
-            abi.encodeWithSelector(PointsHub.InsufficientRewardTokens.selector, 0, claimable)
-        );
+        vm.expectRevert(abi.encodeWithSelector(PointsHub.InsufficientRewardTokens.selector, 0, claimable));
         pointsHub.redeem(claimable);
     }
 
@@ -334,9 +330,7 @@ contract SecurityTest is BaseTest {
 
     function test_revert_emergencyRemoveModuleByIndex_outOfBounds() public {
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(PointsHub.IndexOutOfBounds.selector, 999, 3)
-        );
+        vm.expectRevert(abi.encodeWithSelector(PointsHub.IndexOutOfBounds.selector, 999, 3));
         pointsHub.emergencyRemoveModuleByIndex(999);
     }
 

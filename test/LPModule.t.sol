@@ -37,14 +37,7 @@ contract LPModuleTest is BaseTest {
 
         assertEq(lpModule.getPoolCount(), 3);
 
-        (
-            address lpToken,
-            uint256 multiplier,
-            bool poolActive,
-            string memory name,
-            ,
-
-        ) = lpModule.getPool(2);
+        (address lpToken, uint256 multiplier, bool poolActive, string memory name,,) = lpModule.getPool(2);
 
         assertEq(lpToken, address(newLpToken));
         assertEq(multiplier, 150);
@@ -95,14 +88,7 @@ contract LPModuleTest is BaseTest {
         vm.prank(admin);
         lpModule.updatePool(0, 200, false);
 
-        (
-            ,
-            uint256 multiplier,
-            bool poolActive,
-            ,
-            ,
-
-        ) = lpModule.getPool(0);
+        (, uint256 multiplier, bool poolActive,,,) = lpModule.getPool(0);
 
         assertEq(multiplier, 200);
         assertFalse(poolActive);
@@ -112,14 +98,7 @@ contract LPModuleTest is BaseTest {
         vm.prank(admin);
         lpModule.updatePoolName(0, "New Name");
 
-        (
-            ,
-            ,
-            ,
-            string memory name,
-            ,
-
-        ) = lpModule.getPool(0);
+        (,,, string memory name,,) = lpModule.getPool(0);
 
         assertEq(name, "New Name");
     }
@@ -146,13 +125,8 @@ contract LPModuleTest is BaseTest {
         lpModule.checkpointUsers(users);
 
         // Verify state
-        (
-            uint256 balance,
-            uint256 lastCheckpointBalance,
-            ,
-            uint256 lastCheckpointTime,
-
-        ) = lpModule.getUserPoolState(user1, 0);
+        (uint256 balance, uint256 lastCheckpointBalance,, uint256 lastCheckpointTime,) =
+            lpModule.getUserPoolState(user1, 0);
 
         assertEq(balance, 1000 * 1e18);
         assertEq(lastCheckpointBalance, 1000 * 1e18);
@@ -165,13 +139,7 @@ contract LPModuleTest is BaseTest {
         vm.prank(user1);
         lpModule.checkpointSelf();
 
-        (
-            ,
-            uint256 lastCheckpointBalance,
-            ,
-            ,
-
-        ) = lpModule.getUserPoolState(user1, 0);
+        (, uint256 lastCheckpointBalance,,,) = lpModule.getUserPoolState(user1, 0);
 
         assertEq(lastCheckpointBalance, 1000 * 1e18);
     }
@@ -182,13 +150,7 @@ contract LPModuleTest is BaseTest {
         vm.prank(user2);
         lpModule.checkpointUserPool(user1, 0);
 
-        (
-            ,
-            uint256 lastCheckpointBalance,
-            ,
-            ,
-
-        ) = lpModule.getUserPoolState(user1, 0);
+        (, uint256 lastCheckpointBalance,,,) = lpModule.getUserPoolState(user1, 0);
 
         assertEq(lastCheckpointBalance, 1000 * 1e18);
     }
@@ -233,12 +195,7 @@ contract LPModuleTest is BaseTest {
         uint256 totalPoints = lpModule.getPoints(user1);
 
         // Get individual pool points
-        (
-            string[] memory names,
-            uint256[] memory points,
-            ,
-
-        ) = lpModule.getUserPoolBreakdown(user1);
+        (string[] memory names, uint256[] memory points,,) = lpModule.getUserPoolBreakdown(user1);
 
         assertEq(names.length, 2);
         assertGt(points[0], 0);
@@ -260,12 +217,7 @@ contract LPModuleTest is BaseTest {
         _advanceTime(1 days);
 
         // Points for inactive pool should be from before deactivation
-        (
-            ,
-            uint256[] memory points,
-            ,
-
-        ) = lpModule.getUserPoolBreakdown(user1);
+        (, uint256[] memory points,,) = lpModule.getUserPoolBreakdown(user1);
 
         // Pool 0 is inactive, should have 0 new points after deactivation
         // But might have points from before (depends on timing)
@@ -313,12 +265,8 @@ contract LPModuleTest is BaseTest {
 
         _advanceTime(1 hours);
 
-        (
-            string[] memory names,
-            uint256[] memory points,
-            uint256[] memory balances,
-            uint256[] memory multipliers
-        ) = lpModule.getUserPoolBreakdown(user1);
+        (string[] memory names, uint256[] memory points, uint256[] memory balances, uint256[] memory multipliers) =
+            lpModule.getUserPoolBreakdown(user1);
 
         assertEq(names.length, 2);
         assertEq(names[0], "LP Pool 1");
@@ -395,14 +343,7 @@ contract LPModuleTest is BaseTest {
 
     function test_zeroLpSupply() public {
         // No LP minted, supply is 0
-        (
-            ,
-            ,
-            ,
-            ,
-            uint256 totalSupply,
-
-        ) = lpModule.getPool(0);
+        (,,,, uint256 totalSupply,) = lpModule.getPool(0);
 
         assertEq(totalSupply, 0);
     }
