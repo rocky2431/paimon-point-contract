@@ -14,7 +14,7 @@ contract HoldingModuleTest is BaseTest {
     // ============================================
 
     function test_initialization() public view {
-        assertEq(holdingModule.VERSION(), "1.2.0");
+        assertEq(holdingModule.VERSION(), "1.3.0");
         assertEq(holdingModule.MODULE_NAME(), "PPT Holding");
         assertEq(holdingModule.pointsRatePerSecond(), POINTS_RATE_PER_SECOND);
         assertTrue(holdingModule.isActive());

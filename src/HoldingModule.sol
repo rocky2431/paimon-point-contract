@@ -32,7 +32,7 @@ contract HoldingModule is
 
     uint256 public constant PRECISION = 1e18;
     string public constant MODULE_NAME = "PPT Holding";
-    string public constant VERSION = "1.2.0";
+    string public constant VERSION = "1.3.0";
 
     /// @notice Maximum batch size for user checkpoints
     uint256 public constant MAX_BATCH_USERS = 100;
@@ -151,6 +151,7 @@ contract HoldingModule is
         pointsRatePerSecond = _pointsRatePerSecond;
         lastUpdateTime = block.timestamp;
         active = true;
+        minHoldingBlocks = 1; // Default: 1 block for flash loan protection
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(ADMIN_ROLE, admin);

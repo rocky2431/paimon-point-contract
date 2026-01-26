@@ -15,7 +15,7 @@ contract PenaltyModuleTest is BaseTest {
     // ============================================
 
     function test_initialization() public view {
-        assertEq(penaltyModule.VERSION(), "1.2.0");
+        assertEq(penaltyModule.VERSION(), "1.3.0");
         assertEq(penaltyModule.penaltyRateBps(), PENALTY_RATE_BPS);
         assertTrue(penaltyModule.hasRole(penaltyModule.ADMIN_ROLE(), admin));
         assertTrue(penaltyModule.hasRole(penaltyModule.KEEPER_ROLE(), keeper));

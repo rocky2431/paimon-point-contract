@@ -34,7 +34,7 @@ contract LPModule is
     uint256 public constant MULTIPLIER_BASE = 100; // 100 = 1x, 200 = 2x
     uint256 public constant MAX_MULTIPLIER = 1000; // 10x maximum multiplier
     string public constant MODULE_NAME = "LP Providing";
-    string public constant VERSION = "1.2.0";
+    string public constant VERSION = "1.3.0";
 
     /// @notice Maximum batch size for user checkpoints
     uint256 public constant MAX_BATCH_USERS = 25;
@@ -66,6 +66,7 @@ contract LPModule is
         uint256 pointsEarned;       // User's accumulated points
         uint256 lastBalance;        // User's last recorded LP balance
         uint256 lastCheckpoint;     // Last checkpoint timestamp
+        uint256 lastCheckpointBlock; // Last checkpoint block number (for flash loan protection)
     }
 
     // =============================================================================
@@ -89,6 +90,9 @@ contract LPModule is
 
     /// @notice Whether the module is active
     bool public active;
+
+    /// @notice Minimum blocks a balance must be held before counting for points (flash loan protection)
+    uint256 public minHoldingBlocks;
 
     /// @notice Maximum number of pools allowed
     uint256 public constant MAX_POOLS = 20;
@@ -126,6 +130,7 @@ contract LPModule is
     event CheckpointPoolSkipped(uint256 indexed poolId, string reason);
     event PoolNameUpdated(uint256 indexed poolId, string oldName, string newName);
     event LPTokenQueryFailed(uint256 indexed poolId, address indexed lpToken);
+    event MinHoldingBlocksUpdated(uint256 oldBlocks, uint256 newBlocks);
 
     // =============================================================================
     // Errors
@@ -170,6 +175,7 @@ contract LPModule is
 
         basePointsRatePerSecond = _baseRate;
         active = true;
+        minHoldingBlocks = 1; // Default: 1 block for flash loan protection
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(ADMIN_ROLE, admin);
@@ -226,6 +232,7 @@ contract LPModule is
 
     /// @notice Update user state for a pool
     /// @dev Uses try-catch to handle LP token failures gracefully
+    ///      Includes flash loan protection via minHoldingBlocks
     function _updateUserPool(address user, uint256 poolId) internal {
         PoolConfig storage pool = pools[poolId];
         UserPoolState storage userState = userPoolStates[user][poolId];
@@ -233,9 +240,16 @@ contract LPModule is
 
         uint256 cachedPointsPerLp = poolState.pointsPerLpStored;
         uint256 lastBalance = userState.lastBalance;
+        uint256 lastCheckpointBlock = userState.lastCheckpointBlock;
 
-        // Calculate new earned points
-        if (lastBalance > 0) {
+        // Flash loan protection: only credit points if minimum holding blocks have passed
+        // This prevents attackers from borrowing tokens, checkpointing, and returning in same block
+        bool passedHoldingPeriod = lastCheckpointBlock == 0 ||
+            block.number >= lastCheckpointBlock + minHoldingBlocks;
+
+        // Calculate new earned points using last recorded balance
+        // Only credit if holding period requirement is met
+        if (lastBalance > 0 && passedHoldingPeriod) {
             uint256 pointsDelta = cachedPointsPerLp - userState.pointsPerLpPaid;
             uint256 newEarned = (lastBalance * pointsDelta) / PRECISION;
             userState.pointsEarned += newEarned;
@@ -254,6 +268,7 @@ contract LPModule is
         userState.pointsPerLpPaid = cachedPointsPerLp;
         userState.lastBalance = currentBalance;
         userState.lastCheckpoint = block.timestamp;
+        userState.lastCheckpointBlock = block.number;
 
         emit UserPoolCheckpointed(user, poolId, userState.pointsEarned, currentBalance);
     }
@@ -382,7 +397,8 @@ contract LPModule is
             uint256 balance,
             uint256 lastCheckpointBalance,
             uint256 earnedPoints,
-            uint256 lastCheckpointTime
+            uint256 lastCheckpointTime,
+            uint256 lastCheckpointBlock
         )
     {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
@@ -399,6 +415,7 @@ contract LPModule is
         lastCheckpointBalance = userState.lastBalance;
         earnedPoints = _getUserPoolPoints(user, poolId);
         lastCheckpointTime = userState.lastCheckpoint;
+        lastCheckpointBlock = userState.lastCheckpointBlock;
     }
 
     /// @notice Estimate points for LP amount over duration
@@ -624,10 +641,22 @@ contract LPModule is
         emit ModuleActiveStatusUpdated(_active);
     }
 
+    /// @notice Set minimum holding blocks for flash loan protection
+    /// @param blocks Minimum blocks a balance must be held
+    function setMinHoldingBlocks(uint256 blocks) external onlyRole(ADMIN_ROLE) {
+        uint256 oldBlocks = minHoldingBlocks;
+        minHoldingBlocks = blocks;
+        emit MinHoldingBlocksUpdated(oldBlocks, blocks);
+    }
+
+    /// @notice Pause contract operations
+    /// @dev Only callable by ADMIN_ROLE
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
+    /// @notice Unpause contract operations
+    /// @dev Only callable by ADMIN_ROLE
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }

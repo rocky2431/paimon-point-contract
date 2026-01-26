@@ -32,7 +32,7 @@ contract PenaltyModule is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
     uint256 public constant BASIS_POINTS = 10000;
-    string public constant VERSION = "1.2.0";
+    string public constant VERSION = "1.3.0";
 
     /// @notice Maximum batch size for penalty sync
     uint256 public constant MAX_BATCH_SIZE = 100;
@@ -73,6 +73,12 @@ contract PenaltyModule is
     /// @notice Timestamp when pending root becomes effective
     uint256 public pendingRootEffectiveTime;
 
+    /// @notice Head index for circular buffer (next write position)
+    uint256 public rootHistoryHead;
+
+    /// @notice Whether root history array has wrapped around
+    bool public rootHistoryFull;
+
     // =============================================================================
     // Events
     // =============================================================================
@@ -104,6 +110,7 @@ contract PenaltyModule is
     event PenaltyRateUpdated(uint256 oldRate, uint256 newRate);
     event PenaltyModuleUpgraded(address indexed newImplementation, uint256 timestamp);
     event BatchSyncSkipped(address indexed user, string reason);
+    event PendingRootCancelled(bytes32 indexed cancelledRoot, uint256 epoch, address indexed admin);
 
     // =============================================================================
     // Errors
@@ -111,12 +118,14 @@ contract PenaltyModule is
 
     error ZeroAddress();
     error InvalidProof();
+    error ProofForPendingRoot(bytes32 currentRoot, bytes32 pendingRoot, uint256 effectiveTime);
     error PenaltyRootNotSet();
     error InvalidPenaltyRate();
     error ArrayLengthMismatch();
     error BatchTooLarge(uint256 size, uint256 max);
     error PendingRootNotReady(uint256 currentTime, uint256 effectiveTime);
     error NoPendingRoot();
+    error PenaltyCannotDecrease(uint256 current, uint256 requested);
 
     // =============================================================================
     // Constructor & Initializer
@@ -294,23 +303,24 @@ contract PenaltyModule is
     // =============================================================================
 
     /// @notice Internal function to activate a pending root
+    /// @dev Uses circular buffer for O(1) gas cost instead of O(n) array shifting
     function _activateRoot() internal {
         bytes32 oldRoot = penaltyRoot;
         penaltyRoot = pendingRoot;
 
-        // Limit root history growth
-        if (rootHistory.length >= MAX_ROOT_HISTORY) {
-            // Delete oldest root timestamp to free storage
-            delete rootTimestamp[rootHistory[0]];
-            // Shift array (gas intensive but maintains history order)
-            for (uint256 i = 0; i < rootHistory.length - 1; ) {
-                rootHistory[i] = rootHistory[i + 1];
-                unchecked { ++i; }
-            }
-            rootHistory.pop();
+        // Circular buffer implementation - O(1) gas cost
+        if (rootHistory.length < MAX_ROOT_HISTORY) {
+            // Array not yet full, just push
+            rootHistory.push(pendingRoot);
+        } else {
+            // Array full, overwrite at head position
+            // Delete old timestamp at this position
+            delete rootTimestamp[rootHistory[rootHistoryHead]];
+            rootHistory[rootHistoryHead] = pendingRoot;
+            rootHistoryHead = (rootHistoryHead + 1) % MAX_ROOT_HISTORY;
+            rootHistoryFull = true;
         }
 
-        rootHistory.push(pendingRoot);
         rootTimestamp[pendingRoot] = block.timestamp;
         currentEpoch++;
 
@@ -350,6 +360,20 @@ contract PenaltyModule is
         _activateRoot();
     }
 
+    /// @notice Cancel a pending root (admin only)
+    /// @dev Use when a queued root has errors and needs to be replaced
+    function cancelPendingRoot() external onlyRole(ADMIN_ROLE) {
+        if (pendingRoot == bytes32(0)) revert NoPendingRoot();
+
+        bytes32 cancelledRoot = pendingRoot;
+        uint256 cancelledEpoch = currentEpoch + 1;
+
+        pendingRoot = bytes32(0);
+        pendingRootEffectiveTime = 0;
+
+        emit PendingRootCancelled(cancelledRoot, cancelledEpoch, msg.sender);
+    }
+
     // =============================================================================
     // Admin Functions
     // =============================================================================
@@ -365,10 +389,15 @@ contract PenaltyModule is
         emit PenaltyRateUpdated(oldRate, newRateBps);
     }
 
-    /// @notice Admin override: Set user's confirmed penalty
-    /// @dev Use with caution, only for fixing errors
+    /// @notice Admin override: Increase user's confirmed penalty
+    /// @dev Penalties can only increase, not decrease (security constraint)
+    /// @param user User address
+    /// @param penalty New penalty value (must be >= current penalty)
     function setUserPenalty(address user, uint256 penalty) external onlyRole(ADMIN_ROLE) {
         uint256 previousPenalty = confirmedPenalty[user];
+        if (penalty < previousPenalty) {
+            revert PenaltyCannotDecrease(previousPenalty, penalty);
+        }
         confirmedPenalty[user] = penalty;
 
         emit PenaltyConfirmed(user, previousPenalty, penalty, currentEpoch);

@@ -14,7 +14,7 @@ contract ActivityModuleTest is BaseTest {
     // ============================================
 
     function test_initialization() public view {
-        assertEq(activityModule.VERSION(), "1.2.0");
+        assertEq(activityModule.VERSION(), "1.3.0");
         assertEq(activityModule.MODULE_NAME(), "Trading & Activity");
         assertTrue(activityModule.isActive());
         assertEq(activityModule.merkleRoot(), bytes32(0));

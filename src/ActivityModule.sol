@@ -32,7 +32,7 @@ contract ActivityModule is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
     string public constant MODULE_NAME = "Trading & Activity";
-    string public constant VERSION = "1.2.0";
+    string public constant VERSION = "1.3.0";
 
     /// @notice Maximum batch size for claims
     uint256 public constant MAX_BATCH_SIZE = 100;
@@ -80,6 +80,12 @@ contract ActivityModule is
     /// @notice Pending epoch label
     string public pendingEpochLabel;
 
+    /// @notice Head index for circular buffer (next write position)
+    uint256 public rootHistoryHead;
+
+    /// @notice Whether root history array has wrapped around
+    bool public rootHistoryFull;
+
     // =============================================================================
     // Events
     // =============================================================================
@@ -121,6 +127,7 @@ contract ActivityModule is
 
     error ZeroAddress();
     error InvalidProof();
+    error ProofForPendingRoot(bytes32 currentRoot, bytes32 pendingRoot, uint256 effectiveTime);
     error NothingToClaim();
     error MerkleRootNotSet();
     error ClaimExceedsMerkleAmount(uint256 claimed, uint256 merkleAmount);
@@ -135,6 +142,7 @@ contract ActivityModule is
     // =============================================================================
 
     event UserClaimedReset(address indexed user, uint256 previousAmount, uint256 newAmount, address indexed admin);
+    event PendingRootCancelled(bytes32 indexed cancelledRoot, uint256 epoch, address indexed admin);
 
     // =============================================================================
     // Constructor & Initializer
@@ -347,23 +355,24 @@ contract ActivityModule is
     // =============================================================================
 
     /// @notice Internal function to activate a pending root
+    /// @dev Uses circular buffer for O(1) gas cost instead of O(n) array shifting
     function _activateRoot() internal {
         bytes32 oldRoot = merkleRoot;
         merkleRoot = pendingRoot;
 
-        // Limit root history growth
-        if (rootHistory.length >= MAX_ROOT_HISTORY) {
-            // Delete oldest root timestamp to free storage
-            delete rootTimestamp[rootHistory[0]];
-            // Shift array (gas intensive but maintains history order)
-            for (uint256 i = 0; i < rootHistory.length - 1; ) {
-                rootHistory[i] = rootHistory[i + 1];
-                unchecked { ++i; }
-            }
-            rootHistory.pop();
+        // Circular buffer implementation - O(1) gas cost
+        if (rootHistory.length < MAX_ROOT_HISTORY) {
+            // Array not yet full, just push
+            rootHistory.push(pendingRoot);
+        } else {
+            // Array full, overwrite at head position
+            // Delete old timestamp at this position
+            delete rootTimestamp[rootHistory[rootHistoryHead]];
+            rootHistory[rootHistoryHead] = pendingRoot;
+            rootHistoryHead = (rootHistoryHead + 1) % MAX_ROOT_HISTORY;
+            rootHistoryFull = true;
         }
 
-        rootHistory.push(pendingRoot);
         rootTimestamp[pendingRoot] = block.timestamp;
 
         currentEpoch = pendingEpoch;
@@ -429,6 +438,22 @@ contract ActivityModule is
     function emergencyActivateRoot() external onlyRole(ADMIN_ROLE) {
         if (pendingRoot == bytes32(0)) revert NoPendingRoot();
         _activateRoot();
+    }
+
+    /// @notice Cancel a pending root (admin only)
+    /// @dev Use when a queued root has errors and needs to be replaced
+    function cancelPendingRoot() external onlyRole(ADMIN_ROLE) {
+        if (pendingRoot == bytes32(0)) revert NoPendingRoot();
+
+        bytes32 cancelledRoot = pendingRoot;
+        uint256 cancelledEpoch = pendingEpoch;
+
+        pendingRoot = bytes32(0);
+        pendingRootEffectiveTime = 0;
+        pendingEpoch = 0;
+        pendingEpochLabel = "";
+
+        emit PendingRootCancelled(cancelledRoot, cancelledEpoch, msg.sender);
     }
 
     // =============================================================================

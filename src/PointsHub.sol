@@ -34,8 +34,8 @@ contract PointsHub is
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MAX_MODULES = 10;
 
-    /// @notice Gas limit for each module call (prevents DoS from malicious modules)
-    uint256 public constant MODULE_GAS_LIMIT = 100_000;
+    /// @notice Default gas limit for module calls
+    uint256 public constant DEFAULT_MODULE_GAS_LIMIT = 200_000;
 
     /// @notice Maximum exchange rate (prevents extreme values)
     uint256 public constant MAX_EXCHANGE_RATE = 1e24;
@@ -44,7 +44,7 @@ contract PointsHub is
     uint256 public constant MIN_EXCHANGE_RATE = 1e12;
 
     /// @notice Contract version for upgrade tracking
-    string public constant VERSION = "1.2.0";
+    string public constant VERSION = "1.3.0";
 
     // =============================================================================
     // State Variables
@@ -78,6 +78,9 @@ contract PointsHub is
     /// @notice Total points redeemed by all users
     uint256 public totalRedeemedPoints;
 
+    /// @notice Configurable gas limit for module calls
+    uint256 public moduleGasLimit;
+
     // =============================================================================
     // Events
     // =============================================================================
@@ -96,6 +99,7 @@ contract PointsHub is
         uint256 totalRedeemed
     );
     event PointsHubUpgraded(address indexed newImplementation, uint256 timestamp);
+    event ModuleGasLimitUpdated(uint256 oldLimit, uint256 newLimit);
 
     // =============================================================================
     // Errors
@@ -141,6 +145,8 @@ contract PointsHub is
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(ADMIN_ROLE, admin);
         _grantRole(UPGRADER_ROLE, upgrader);
+
+        moduleGasLimit = DEFAULT_MODULE_GAS_LIMIT;
     }
 
     // =============================================================================
@@ -161,11 +167,13 @@ contract PointsHub is
     /// @return total Total points from all modules
     function getTotalPoints(address user) public view returns (uint256 total) {
         uint256 len = modules.length;
+        uint256 gasLimit = moduleGasLimit > 0 ? moduleGasLimit : DEFAULT_MODULE_GAS_LIMIT;
+
         for (uint256 i = 0; i < len; ) {
             address moduleAddr = address(modules[i]);
 
             // Check if module is active with gas limit
-            (bool successActive, bytes memory dataActive) = moduleAddr.staticcall{gas: MODULE_GAS_LIMIT}(
+            (bool successActive, bytes memory dataActive) = moduleAddr.staticcall{gas: gasLimit}(
                 abi.encodeWithSelector(IPointsModule.isActive.selector)
             );
 
@@ -173,7 +181,7 @@ contract PointsHub is
                 bool isActiveFlag = abi.decode(dataActive, (bool));
                 if (isActiveFlag) {
                     // Get points with gas limit
-                    (bool successPoints, bytes memory dataPoints) = moduleAddr.staticcall{gas: MODULE_GAS_LIMIT}(
+                    (bool successPoints, bytes memory dataPoints) = moduleAddr.staticcall{gas: gasLimit}(
                         abi.encodeWithSelector(IPointsModule.getPoints.selector, user)
                     );
 
@@ -190,12 +198,60 @@ contract PointsHub is
         }
     }
 
-    /// @notice Get penalty points for a user
+    /// @notice Get total points for a user with detailed module success status
+    /// @dev Returns which modules succeeded/failed so callers can detect issues
     /// @param user The user address
-    /// @return Penalty points (0 if no penalty module set)
+    /// @return total Total points from successful modules
+    /// @return moduleSuccess Array indicating success status for each module
+    function getTotalPointsWithStatus(address user)
+        public
+        view
+        returns (uint256 total, bool[] memory moduleSuccess)
+    {
+        uint256 len = modules.length;
+        moduleSuccess = new bool[](len);
+        uint256 gasLimit = moduleGasLimit > 0 ? moduleGasLimit : DEFAULT_MODULE_GAS_LIMIT;
+
+        for (uint256 i = 0; i < len; ) {
+            address moduleAddr = address(modules[i]);
+
+            (bool successActive, bytes memory dataActive) = moduleAddr.staticcall{gas: gasLimit}(
+                abi.encodeWithSelector(IPointsModule.isActive.selector)
+            );
+
+            if (successActive && dataActive.length >= 32) {
+                bool isActiveFlag = abi.decode(dataActive, (bool));
+                if (isActiveFlag) {
+                    (bool successPoints, bytes memory dataPoints) = moduleAddr.staticcall{gas: gasLimit}(
+                        abi.encodeWithSelector(IPointsModule.getPoints.selector, user)
+                    );
+
+                    if (successPoints && dataPoints.length >= 32) {
+                        total += abi.decode(dataPoints, (uint256));
+                        moduleSuccess[i] = true;
+                    }
+                    // moduleSuccess[i] remains false if call failed
+                } else {
+                    moduleSuccess[i] = true; // Module inactive is not a failure
+                }
+            }
+            // moduleSuccess[i] remains false if isActive call failed
+
+            unchecked { ++i; }
+        }
+    }
+
+    /// @notice Get penalty points for a user
+    /// @dev Uses try-catch to prevent penalty module failures from blocking system
+    /// @param user The user address
+    /// @return Penalty points (0 if no penalty module set or call fails)
     function getPenaltyPoints(address user) public view returns (uint256) {
         if (address(penaltyModule) == address(0)) return 0;
-        return penaltyModule.getPenalty(user);
+        try penaltyModule.getPenalty(user) returns (uint256 penalty) {
+            return penalty;
+        } catch {
+            return 0;
+        }
     }
 
     /// @notice Get claimable points for a user
@@ -484,10 +540,22 @@ contract PointsHub is
     // Admin Functions - Pause
     // =============================================================================
 
+    /// @notice Set the gas limit for module calls
+    /// @param limit New gas limit (0 to use default)
+    function setModuleGasLimit(uint256 limit) external onlyRole(ADMIN_ROLE) {
+        uint256 oldLimit = moduleGasLimit;
+        moduleGasLimit = limit;
+        emit ModuleGasLimitUpdated(oldLimit, limit);
+    }
+
+    /// @notice Pause contract operations
+    /// @dev Only callable by ADMIN_ROLE
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
+    /// @notice Unpause contract operations
+    /// @dev Only callable by ADMIN_ROLE
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }

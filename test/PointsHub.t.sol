@@ -16,7 +16,7 @@ contract PointsHubTest is BaseTest {
     // ============================================
 
     function test_initialization() public view {
-        assertEq(pointsHub.VERSION(), "1.2.0");
+        assertEq(pointsHub.VERSION(), "1.3.0");
         assertTrue(pointsHub.hasRole(pointsHub.ADMIN_ROLE(), admin));
         assertTrue(pointsHub.hasRole(pointsHub.UPGRADER_ROLE(), upgrader));
         assertEq(address(pointsHub.rewardToken()), address(rewardToken));

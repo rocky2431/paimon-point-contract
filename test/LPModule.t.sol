@@ -14,7 +14,7 @@ contract LPModuleTest is BaseTest {
     // ============================================
 
     function test_initialization() public view {
-        assertEq(lpModule.VERSION(), "1.2.0");
+        assertEq(lpModule.VERSION(), "1.3.0");
         assertEq(lpModule.MODULE_NAME(), "LP Providing");
         assertEq(lpModule.basePointsRatePerSecond(), LP_BASE_RATE);
         assertTrue(lpModule.isActive());
@@ -150,7 +150,8 @@ contract LPModuleTest is BaseTest {
             uint256 balance,
             uint256 lastCheckpointBalance,
             ,
-            uint256 lastCheckpointTime
+            uint256 lastCheckpointTime,
+
         ) = lpModule.getUserPoolState(user1, 0);
 
         assertEq(balance, 1000 * 1e18);
@@ -168,6 +169,7 @@ contract LPModuleTest is BaseTest {
             ,
             uint256 lastCheckpointBalance,
             ,
+            ,
 
         ) = lpModule.getUserPoolState(user1, 0);
 
@@ -183,6 +185,7 @@ contract LPModuleTest is BaseTest {
         (
             ,
             uint256 lastCheckpointBalance,
+            ,
             ,
 
         ) = lpModule.getUserPoolState(user1, 0);
@@ -338,13 +341,15 @@ contract LPModuleTest is BaseTest {
             uint256 balance,
             uint256 lastCheckpointBalance,
             uint256 earnedPoints,
-            uint256 lastCheckpointTime
+            uint256 lastCheckpointTime,
+            uint256 lastCheckpointBlock
         ) = lpModule.getUserPoolState(user1, 0);
 
         assertEq(balance, 1000 * 1e18);
         assertEq(lastCheckpointBalance, 1000 * 1e18);
         assertGt(earnedPoints, 0);
         assertGt(lastCheckpointTime, 0);
+        assertGt(lastCheckpointBlock, 0);
     }
 
     // ============================================
