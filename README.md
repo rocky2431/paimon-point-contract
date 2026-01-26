@@ -1,150 +1,992 @@
-# Paimon Points System
+# Paimon Points System v1.3.0
 
-A modular on-chain points system for the Paimon Protocol, built with Solidity 0.8.24 and Foundry.
+链上模块化积分系统，支持多种积分获取方式和统一兑换机制。
 
-## Overview
+## 目录
 
-The Paimon Points System rewards users for various activities including PPT holding, LP providing, and trading. Points can be redeemed for tokens based on configurable exchange rates.
+- [架构概述](#架构概述)
+- [合约清单](#合约清单)
+- [PointsHub (中央聚合器)](#pointshub-中央聚合器)
+- [HoldingModule (持有模块)](#holdingmodule-持有模块)
+- [StakingModule (质押模块)](#stakingmodule-质押模块)
+- [LPModule (LP模块)](#lpmodule-lp模块)
+- [ActivityModule (活动模块)](#activitymodule-活动模块)
+- [PenaltyModule (惩罚模块)](#penaltymodule-惩罚模块)
+- [接口定义](#接口定义)
+- [角色权限](#角色权限)
+- [部署指南](#部署指南)
+- [安全机制](#安全机制)
+- [Gas 估算](#gas-估算)
 
-## Architecture
+---
+
+## 架构概述
+
+### 系统拓扑
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        PointsHub                            │
-│              (Central Aggregation & Redemption)             │
-└─────────────────────────────────────────────────────────────┘
-        │              │              │              │
-        ▼              ▼              ▼              ▼
-┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│  Holding    │ │     LP      │ │  Activity   │ │   Penalty   │
-│   Module    │ │   Module    │ │   Module    │ │   Module    │
-│             │ │             │ │             │ │             │
-│ PPT Holding │ │ LP Rewards  │ │  Trading    │ │ Redemption  │
-│   Rewards   │ │ Multi-Pool  │ │  Rewards    │ │  Penalties  │
-└─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         PointsHub v1.3.0                            │
+│                    (中央聚合器 + 兑换引擎)                            │
+│                                                                     │
+│  公式: claimablePoints = Σ modules.getPoints(user)                  │
+│                         - penaltyModule.getPenalty(user)            │
+│                         - redeemedPoints[user]                      │
+└─────────────────┬───────────────────────────────────┬───────────────┘
+                  │                                   │
+      ┌───────────┴───────────────┐       ┌──────────┴──────────┐
+      │     Points Modules        │       │   Penalty Module    │
+      │   (IPointsModule 接口)    │       │ (IPenaltyModule)    │
+      └───────────┬───────────────┘       └─────────────────────┘
+                  │
+    ┌─────────────┼─────────────┬─────────────────┐
+    │             │             │                 │
+    ▼             ▼             ▼                 ▼
+┌─────────┐ ┌─────────────┐ ┌─────────┐ ┌─────────────────┐
+│Holding  │ │  Staking    │ │   LP    │ │    Activity     │
+│Module   │ │  Module     │ │ Module  │ │     Module      │
+│         │ │             │ │         │ │                 │
+│ 持有PPT │ │ 锁定质押PPT │ │ 质押LP  │ │  Merkle proof   │
+│ 即得积分│ │ 获得Boost  │ │ 多池支持│ │   链下活动      │
+└─────────┘ └─────────────┘ └─────────┘ └─────────────────┘
 ```
 
-## Contracts
+### 积分算法
 
-| Contract | Description |
-|----------|-------------|
-| `PointsHub.sol` | Central hub for aggregating points from all modules and handling redemption |
-| `HoldingModule.sol` | Rewards for holding PPT tokens (Synthetix-style algorithm) |
-| `LPModule.sol` | Rewards for providing liquidity (multi-pool support with multipliers) |
-| `ActivityModule.sol` | Rewards for trading activities (Merkle proof verification) |
-| `PenaltyModule.sol` | Tracks redemption penalties (Merkle proof verification) |
+所有链上积分模块使用 **Synthetix-style** 累积算法：
 
-## Features
+```
+pointsPerShare += (timeDelta × pointsRatePerSecond × PRECISION) / totalSupply
+userPoints = userBoostedAmount × (currentPointsPerShare - userPointsPerSharePaid) / PRECISION
+```
 
-- **UUPS Upgradeable**: All contracts use OpenZeppelin's UUPS proxy pattern
-- **Role-Based Access**: Admin, Keeper, and Upgrader roles for secure operations
-- **Gas Efficient**: Checkpoint mechanism for batch updates
-- **Merkle Proofs**: Off-chain computation with on-chain verification
-- **Multi-Pool LP**: Support for multiple LP pools with different multipliers
+---
 
-## Installation
+## 合约清单
+
+| 合约 | 文件 | 版本 | 大小 | 描述 |
+|------|------|------|------|------|
+| PointsHub | `src/PointsHub.sol` | 1.3.0 | 22.9 KB | 中央聚合器，积分兑换 |
+| HoldingModule | `src/HoldingModule.sol` | 1.3.0 | 18.0 KB | PPT 持有积分 |
+| StakingModule | `src/StakingModule.sol` | 1.3.0 | 32.2 KB | PPT 锁定质押 (带 Boost) |
+| LPModule | `src/LPModule.sol` | 1.3.0 | 24.8 KB | LP Token 多池质押 |
+| ActivityModule | `src/ActivityModule.sol` | 1.3.0 | 18.6 KB | 链下活动积分 (Merkle) |
+| PenaltyModule | `src/PenaltyModule.sol` | 1.3.0 | 17.1 KB | 惩罚扣除 (Merkle) |
+
+---
+
+## PointsHub (中央聚合器)
+
+### 功能概述
+
+- 注册和管理积分模块
+- 聚合用户在所有模块的总积分
+- 处理积分兑换为代币
+
+### 常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| `PRECISION` | `1e18` | 计算精度 |
+| `MAX_MODULES` | `10` | 最大模块数 |
+| `DEFAULT_MODULE_GAS_LIMIT` | `200,000` | 模块调用 Gas 限制 |
+| `MAX_EXCHANGE_RATE` | `1e24` | 最大兑换率 |
+| `MIN_EXCHANGE_RATE` | `1e12` | 最小兑换率 |
+
+### 状态变量
+
+| 变量 | 类型 | 描述 |
+|------|------|------|
+| `modules` | `IPointsModule[]` | 已注册模块数组 |
+| `isModule` | `mapping(address => bool)` | 模块注册状态 |
+| `penaltyModule` | `IPenaltyModule` | 惩罚模块地址 |
+| `rewardToken` | `IERC20` | 兑换代币 |
+| `exchangeRate` | `uint256` | 兑换率 (1e18 精度) |
+| `redeemEnabled` | `bool` | 兑换开关 |
+| `redeemedPoints` | `mapping(address => uint256)` | 用户已兑换积分 |
+| `maxRedeemPerTx` | `uint256` | 单笔最大兑换量 (0=无限) |
+| `totalRedeemedPoints` | `uint256` | 全局已兑换积分 |
+| `moduleGasLimit` | `uint256` | 模块调用 Gas 限制 |
+
+### 核心函数
+
+#### 查询函数
+
+```solidity
+// 获取用户总积分 (所有活跃模块)
+function getTotalPoints(address user) public view returns (uint256 total)
+
+// 获取用户总积分 (带模块成功状态)
+function getTotalPointsWithStatus(address user)
+    public view returns (uint256 total, bool[] memory moduleSuccess)
+
+// 获取用户惩罚积分
+function getPenaltyPoints(address user) public view returns (uint256)
+
+// 获取可兑换积分 = 总积分 - 惩罚 - 已兑换
+function getClaimablePoints(address user) public view returns (uint256)
+
+// 获取积分明细
+function getPointsBreakdown(address user) external view returns (
+    string[] memory names,      // 模块名称
+    uint256[] memory points,    // 各模块积分
+    uint256 penalty,            // 惩罚积分
+    uint256 redeemed,           // 已兑换积分
+    uint256 claimable           // 可兑换积分
+)
+
+// 预览兑换
+function previewRedeem(uint256 pointsAmount) public view returns (uint256 tokenAmount)
+```
+
+#### 用户函数
+
+```solidity
+// 兑换积分为代币
+// tokenAmount = pointsAmount × exchangeRate / PRECISION
+function redeem(uint256 pointsAmount) external nonReentrant whenNotPaused
+```
+
+#### 管理函数
+
+```solidity
+// 模块管理 (ADMIN_ROLE)
+function registerModule(address module) external onlyRole(ADMIN_ROLE)
+function removeModule(address module) external onlyRole(ADMIN_ROLE)
+function emergencyRemoveModuleByIndex(uint256 index) external onlyRole(ADMIN_ROLE)
+function setPenaltyModule(address _penaltyModule) external onlyRole(ADMIN_ROLE)
+
+// 兑换配置 (ADMIN_ROLE)
+function setRewardToken(address token) external onlyRole(ADMIN_ROLE)
+function setExchangeRate(uint256 rate) external onlyRole(ADMIN_ROLE)
+function setRedeemEnabled(bool enabled) external onlyRole(ADMIN_ROLE)
+function setMaxRedeemPerTx(uint256 max) external onlyRole(ADMIN_ROLE)
+function withdrawRewardTokens(address to, uint256 amount) external onlyRole(ADMIN_ROLE)
+
+// 系统配置 (ADMIN_ROLE)
+function setModuleGasLimit(uint256 limit) external onlyRole(ADMIN_ROLE)
+function pause() external onlyRole(ADMIN_ROLE)
+function unpause() external onlyRole(ADMIN_ROLE)
+```
+
+### 事件
+
+```solidity
+event ModuleRegistered(address indexed module, string name, uint256 moduleIndex);
+event ModuleRemoved(address indexed module, uint256 moduleIndex);
+event PenaltyModuleUpdated(address indexed oldModule, address indexed newModule);
+event RewardTokenUpdated(address indexed oldToken, address indexed newToken);
+event ExchangeRateUpdated(uint256 oldRate, uint256 newRate);
+event RedeemStatusUpdated(bool enabled);
+event MaxRedeemPerTxUpdated(uint256 oldMax, uint256 newMax);
+event PointsRedeemed(address indexed user, uint256 pointsAmount, uint256 tokenAmount, uint256 totalRedeemed);
+event PointsHubUpgraded(address indexed newImplementation, uint256 timestamp);
+event ModuleGasLimitUpdated(uint256 oldLimit, uint256 newLimit);
+```
+
+### 错误
+
+```solidity
+error ZeroAddress();
+error ZeroAmount();
+error ModuleAlreadyRegistered(address module);
+error ModuleNotFound(address module);
+error RedeemNotEnabled();
+error InsufficientPoints(uint256 available, uint256 requested);
+error ExceedsMaxRedeemPerTx(uint256 requested, uint256 max);
+error InsufficientRewardTokens(uint256 available, uint256 required);
+error ExchangeRateNotSet();
+error RewardTokenNotSet();
+error IndexOutOfBounds(uint256 index, uint256 length);
+error InvalidModuleInterface(address module);
+error MaxModulesReached();
+error InvalidExchangeRate(uint256 rate, uint256 min, uint256 max);
+error InvalidPenaltyModuleInterface(address module);
+error ZeroTokenAmount();
+```
+
+---
+
+## HoldingModule (持有模块)
+
+### 功能概述
+
+简单持有 PPT 即可获得积分，无需锁定。
+
+### 常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| `PRECISION` | `1e18` | 计算精度 |
+| `MODULE_NAME` | `"PPT Holding"` | 模块名称 |
+| `MAX_BATCH_USERS` | `100` | 批量 checkpoint 最大用户数 |
+
+### 状态变量
+
+| 变量 | 类型 | 描述 |
+|------|------|------|
+| `ppt` | `IPPT` | PPT Vault 合约 |
+| `pointsRatePerSecond` | `uint256` | 每秒每 PPT 积分率 |
+| `lastUpdateTime` | `uint256` | 上次全局更新时间 |
+| `pointsPerShareStored` | `uint256` | 累积每份积分 |
+| `userPointsPerSharePaid` | `mapping(address => uint256)` | 用户上次记录的每份积分 |
+| `userPointsEarned` | `mapping(address => uint256)` | 用户累积积分 |
+| `userLastBalance` | `mapping(address => uint256)` | 用户上次记录余额 |
+| `userLastCheckpoint` | `mapping(address => uint256)` | 用户上次 checkpoint 时间 |
+| `userLastCheckpointBlock` | `mapping(address => uint256)` | 用户上次 checkpoint 区块 |
+| `active` | `bool` | 模块激活状态 |
+| `minBalanceThreshold` | `uint256` | 最小余额阈值 |
+| `minHoldingBlocks` | `uint256` | Flash loan 防护区块数 |
+| `useEffectiveSupply` | `bool` | 是否使用 effectiveSupply |
+
+### 核心函数
+
+```solidity
+// IPointsModule 实现
+function getPoints(address user) external view returns (uint256)
+function moduleName() external pure returns (string memory)
+function isActive() external view returns (bool)
+
+// Checkpoint
+function checkpointGlobal() external onlyRole(KEEPER_ROLE)
+function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE)
+function checkpoint(address user) external
+function checkpointSelf() external
+
+// 查询
+function currentPointsPerShare() external view returns (uint256)
+function getUserState(address user) external view returns (
+    uint256 balance,
+    uint256 lastCheckpointBalance,
+    uint256 earnedPoints,
+    uint256 lastCheckpointTime
+)
+function estimatePoints(uint256 balance, uint256 durationSeconds) external view returns (uint256)
+
+// 管理
+function setPointsRate(uint256 newRate) external onlyRole(ADMIN_ROLE)
+function setMinBalanceThreshold(uint256 threshold) external onlyRole(ADMIN_ROLE)
+function setActive(bool _active) external onlyRole(ADMIN_ROLE)
+function setPpt(address _ppt) external onlyRole(ADMIN_ROLE)
+function setSupplyMode(bool _useEffectiveSupply) external onlyRole(ADMIN_ROLE)
+function setMinHoldingBlocks(uint256 blocks) external onlyRole(ADMIN_ROLE)
+function pause() external onlyRole(ADMIN_ROLE)
+function unpause() external onlyRole(ADMIN_ROLE)
+```
+
+### 积分计算公式
+
+```
+// 全局状态更新
+pointsPerShareStored += (timeDelta × pointsRatePerSecond × PRECISION) / effectiveSupply
+
+// 用户积分计算
+pendingPoints = userLastBalance × (currentPointsPerShare - userPointsPerSharePaid) / PRECISION
+totalPoints = userPointsEarned + pendingPoints
+```
+
+---
+
+## StakingModule (质押模块)
+
+### 功能概述
+
+锁定质押 PPT 获得 Boost 加成积分，替代 HoldingModule。
+
+### 常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| `PRECISION` | `1e18` | 计算精度 |
+| `BOOST_BASE` | `10000` | Boost 基数 (1x = 10000) |
+| `MAX_EXTRA_BOOST` | `10000` | 最大额外 Boost (1x) |
+| `MIN_LOCK_DURATION` | `7 days` | 最小锁定期 |
+| `MAX_LOCK_DURATION` | `365 days` | 最大锁定期 |
+| `EARLY_UNLOCK_PENALTY_BPS` | `5000` | 提前解锁惩罚 (50%) |
+| `MAX_STAKES_PER_USER` | `10` | 每用户最大质押数 |
+| `MAX_BATCH_USERS` | `100` | 批量 checkpoint 最大用户数 |
+| `MAX_STAKE_AMOUNT` | `type(uint128).max / 2` | 单笔最大质押量 |
+| `MIN_POINTS_RATE` | `1` | 最小积分率 |
+| `MAX_POINTS_RATE` | `1e24` | 最大积分率 |
+
+### Boost 倍数表
+
+| 锁定时长 | Boost 倍数 | 计算公式 |
+|----------|-----------|----------|
+| 7 天 (最小) | 1.019x | `10000 + (7 × 10000 / 365) = 10191` |
+| 30 天 | 1.082x | `10000 + (30 × 10000 / 365) = 10822` |
+| 90 天 | 1.247x | `10000 + (90 × 10000 / 365) = 12466` |
+| 180 天 | 1.493x | `10000 + (180 × 10000 / 365) = 14932` |
+| 365 天 (最大) | 2.0x | `10000 + (365 × 10000 / 365) = 20000` |
+
+### 数据结构
+
+```solidity
+/// @notice 单个质押记录 (2 storage slots)
+struct StakeInfo {
+    uint128 amount;              // 质押数量
+    uint128 boostedAmount;       // amount × boost / BOOST_BASE
+    uint128 pointsEarnedAtStake; // 质押时累积积分 (用于惩罚计算)
+    uint64 lockEndTime;          // 解锁时间
+    uint56 lockDuration;         // 锁定期 (秒)
+    bool isActive;               // 是否活跃
+}
+
+/// @notice 用户聚合状态 (O(1) 查询)
+struct UserState {
+    uint256 totalBoostedAmount;  // 所有活跃质押的 boostedAmount 之和
+    uint256 pointsPerSharePaid;  // 上次 checkpoint 的全局 PPS
+    uint256 pointsEarned;        // 累积积分 (已扣除惩罚)
+    uint256 lastCheckpointBlock; // Flash loan 防护
+}
+```
+
+### 状态变量
+
+| 变量 | 类型 | 描述 |
+|------|------|------|
+| `ppt` | `IERC20` | PPT Token |
+| `pointsRatePerSecond` | `uint256` | 每秒每 boosted PPT 积分率 |
+| `lastUpdateTime` | `uint256` | 上次全局更新时间 |
+| `pointsPerShareStored` | `uint256` | 累积每 boosted 份积分 |
+| `totalBoostedStaked` | `uint256` | 全局 boosted 质押量 |
+| `userStates` | `mapping(address => UserState)` | 用户状态 |
+| `userStakes` | `mapping(address => mapping(uint256 => StakeInfo))` | 用户质押记录 |
+| `userStakeCount` | `mapping(address => uint256)` | 用户质押数量 |
+| `active` | `bool` | 模块激活状态 |
+| `minHoldingBlocks` | `uint256` | Flash loan 防护区块数 |
+
+### 核心函数
+
+#### 质押/解锁
+
+```solidity
+// 质押 PPT (锁定 7-365 天)
+function stake(uint256 amount, uint256 lockDuration)
+    external nonReentrant whenNotPaused returns (uint256 stakeIndex)
+
+// 解锁质押 (提前解锁有惩罚)
+function unstake(uint256 stakeIndex) external nonReentrant whenNotPaused
+```
+
+#### Boost 计算
+
+```solidity
+// 计算 Boost 倍数 (宽松版 - 超出范围自动截断)
+function calculateBoost(uint256 lockDuration) public pure returns (uint256 boost)
+
+// 计算 Boost 倍数 (严格版 - 超出范围 revert)
+function calculateBoostStrict(uint256 lockDuration) public pure returns (uint256 boost)
+
+// 计算 Boosted 数量
+function calculateBoostedAmount(uint256 amount, uint256 lockDuration) public pure returns (uint256)
+```
+
+#### 查询函数
+
+```solidity
+// IPointsModule 实现
+function getPoints(address user) external view returns (uint256)
+function moduleName() external pure returns (string memory)
+function isActive() external view returns (bool)
+
+// 状态查询
+function currentPointsPerShare() external view returns (uint256)
+function getUserState(address user) external view returns (
+    uint256 totalBoostedAmount,
+    uint256 earnedPoints,
+    uint256 activeStakeCount
+)
+function getStakeInfo(address user, uint256 stakeIndex) external view returns (StakeInfo memory)
+function getAllStakes(address user) external view returns (StakeInfo[] memory)
+
+// 估算
+function estimatePoints(uint256 amount, uint256 lockDuration, uint256 holdDuration) external view returns (uint256)
+function calculatePotentialPenalty(address user, uint256 stakeIndex) external view returns (uint256 penalty)
+```
+
+#### Checkpoint
+
+```solidity
+function checkpointGlobal() external onlyRole(KEEPER_ROLE)
+function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE)
+function checkpoint(address user) external returns (bool pointsCredited)
+function checkpointSelf() external returns (bool pointsCredited)
+```
+
+### 提前解锁惩罚公式
+
+```
+earnedSinceStake = currentPoints - pointsEarnedAtStake
+remainingTime = lockEndTime - block.timestamp
+penalty = earnedSinceStake × (remainingTime / lockDuration) × 50%
+```
+
+**示例:**
+- 用户质押 365 天，已锁定 180 天，期间获得 1000 积分
+- remainingTime = 185 天
+- penalty = 1000 × (185 / 365) × 50% = 253 积分
+
+### 事件
+
+```solidity
+event Staked(address indexed user, uint256 indexed stakeIndex, uint256 amount, uint256 lockDuration, uint256 boostedAmount, uint256 lockEndTime);
+event Unstaked(address indexed user, uint256 indexed stakeIndex, uint256 amount, uint256 actualPenalty, uint256 theoreticalPenalty, bool isEarlyUnlock, bool penaltyWasCapped);
+event GlobalCheckpointed(uint256 pointsPerShare, uint256 timestamp, uint256 totalBoostedStaked);
+event UserCheckpointed(address indexed user, uint256 pointsEarned, uint256 totalBoostedAmount, uint256 timestamp, bool pointsCredited);
+event FlashLoanProtectionTriggered(address indexed user, uint256 blocksRemaining);
+event ZeroAddressSkipped(uint256 indexed position);
+event PointsRateUpdated(uint256 oldRate, uint256 newRate);
+event ModuleActiveStatusUpdated(bool active);
+event StakingModuleUpgraded(address indexed newImplementation, uint256 timestamp);
+event MinHoldingBlocksUpdated(uint256 oldBlocks, uint256 newBlocks);
+event PptUpdated(address indexed oldPpt, address indexed newPpt);
+```
+
+### 错误
+
+```solidity
+error ZeroAddress();
+error ZeroAmount();
+error InvalidLockDuration(uint256 duration, uint256 min, uint256 max);
+error MaxStakesReached(uint256 current, uint256 max);
+error StakeNotFound(uint256 stakeIndex);
+error StakeNotActive(uint256 stakeIndex);
+error BatchTooLarge(uint256 size, uint256 max);
+error AmountTooLarge(uint256 amount, uint256 max);
+error InvalidPointsRate(uint256 rate, uint256 min, uint256 max);
+error NotAContract(address addr);
+error InvalidERC20(address addr);
+error PointsOverflow(uint256 points);
+error InvalidHoldDuration(uint256 holdDuration, uint256 lockDuration);
+```
+
+---
+
+## LPModule (LP模块)
+
+### 功能概述
+
+质押 LP Token 获得积分，支持多个 LP 池和不同倍数。
+
+### 常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| `PRECISION` | `1e18` | 计算精度 |
+| `MULTIPLIER_BASE` | `100` | 倍数基数 (100 = 1x) |
+| `MAX_MULTIPLIER` | `1000` | 最大倍数 (10x) |
+| `MAX_POOLS` | `20` | 最大池数 |
+| `MAX_BATCH_USERS` | `25` | 批量最大用户数 |
+| `MAX_OPERATIONS_PER_BATCH` | `200` | 批量最大操作数 |
+
+### 数据结构
+
+```solidity
+struct PoolConfig {
+    address lpToken;     // LP Token 地址
+    uint256 multiplier;  // 积分倍数 (100 = 1x)
+    bool isActive;       // 池是否活跃
+    string name;         // 池名称
+}
+
+struct PoolState {
+    uint256 lastUpdateTime;    // 上次更新时间
+    uint256 pointsPerLpStored; // 累积每 LP 积分
+}
+
+struct UserPoolState {
+    uint256 pointsPerLpPaid;    // 用户上次记录的每 LP 积分
+    uint256 pointsEarned;       // 用户累积积分
+    uint256 lastBalance;        // 用户上次记录余额
+    uint256 lastCheckpoint;     // 上次 checkpoint 时间
+    uint256 lastCheckpointBlock; // 上次 checkpoint 区块
+}
+```
+
+### 核心函数
+
+#### 池管理
+
+```solidity
+// 添加 LP 池
+function addPool(address lpToken, uint256 multiplier, string calldata name) external onlyRole(ADMIN_ROLE)
+
+// 更新池配置
+function updatePool(uint256 poolId, uint256 multiplier, bool poolActive) external onlyRole(ADMIN_ROLE)
+
+// 更新池名称
+function updatePoolName(uint256 poolId, string calldata name) external onlyRole(ADMIN_ROLE)
+
+// 移除池 (标记为 inactive)
+function removePool(uint256 poolId) external onlyRole(ADMIN_ROLE)
+```
+
+#### 查询函数
+
+```solidity
+// IPointsModule 实现
+function getPoints(address user) external view returns (uint256 total)
+
+// 池信息
+function getPoolCount() external view returns (uint256)
+function getPool(uint256 poolId) external view returns (
+    address lpToken,
+    uint256 multiplier,
+    bool poolActive,
+    string memory name,
+    uint256 totalSupply,
+    uint256 pointsPerLp
+)
+
+// 用户信息
+function getUserPoolBreakdown(address user) external view returns (
+    string[] memory names,
+    uint256[] memory points,
+    uint256[] memory balances,
+    uint256[] memory multipliers
+)
+function getUserPoolState(address user, uint256 poolId) external view returns (
+    uint256 balance,
+    uint256 lastCheckpointBalance,
+    uint256 earnedPoints,
+    uint256 lastCheckpointTime,
+    uint256 lastCheckpointBlock
+)
+
+// 估算
+function estimatePoolPoints(uint256 poolId, uint256 lpAmount, uint256 durationSeconds) external view returns (uint256)
+```
+
+#### Checkpoint
+
+```solidity
+function checkpointAllPools() external onlyRole(KEEPER_ROLE)
+function checkpointPools(uint256[] calldata poolIds) external onlyRole(KEEPER_ROLE)
+function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE)
+function checkpoint(address user) external
+function checkpointSelf() external
+function checkpointUserPool(address user, uint256 poolId) external
+```
+
+### 积分计算
+
+```
+effectiveRate = basePointsRatePerSecond × multiplier / MULTIPLIER_BASE
+pointsPerLpStored += (timeDelta × effectiveRate × PRECISION) / totalLpSupply
+userPoints = userLastBalance × (currentPointsPerLp - userPointsPerLpPaid) / PRECISION
+```
+
+---
+
+## ActivityModule (活动模块)
+
+### 功能概述
+
+链下计算活动积分，用户通过 Merkle proof 领取。
+
+### 常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| `MAX_BATCH_SIZE` | `100` | 批量领取最大数量 |
+| `ROOT_DELAY` | `24 hours` | Root 生效延迟 (防抢跑) |
+| `MAX_ROOT_HISTORY` | `100` | Root 历史最大保留数 |
+
+### 状态变量
+
+| 变量 | 类型 | 描述 |
+|------|------|------|
+| `merkleRoot` | `bytes32` | 当前 Merkle Root |
+| `claimedPoints` | `mapping(address => uint256)` | 用户已领取积分 |
+| `active` | `bool` | 模块激活状态 |
+| `currentEpoch` | `uint256` | 当前纪元号 |
+| `currentEpochLabel` | `string` | 当前纪元描述 |
+| `pendingRoot` | `bytes32` | 待生效 Root |
+| `pendingRootEffectiveTime` | `uint256` | 待生效时间 |
+
+### Merkle Leaf 格式
+
+```solidity
+leaf = keccak256(bytes.concat(keccak256(abi.encode(userAddress, totalCumulativePoints))))
+```
+
+### 核心函数
+
+#### 用户领取
+
+```solidity
+// 用户领取积分
+function claim(uint256 totalEarned, bytes32[] calldata proof) external nonReentrant whenNotPaused
+
+// 验证领取 (view)
+function verifyClaim(address user, uint256 totalEarned, bytes32[] calldata proof)
+    public view returns (bool valid, uint256 claimable)
+```
+
+#### Keeper 函数
+
+```solidity
+// 排队新 Root (24小时后生效)
+function updateMerkleRoot(bytes32 newRoot, string calldata label) external onlyRole(KEEPER_ROLE)
+
+// 排队新 Root (指定纪元号)
+function updateMerkleRootWithEpoch(bytes32 newRoot, uint256 epoch, string calldata label) external onlyRole(KEEPER_ROLE)
+
+// 激活待生效 Root
+function activateRoot() external
+
+// 批量帮用户领取
+function batchClaim(address[] calldata users, uint256[] calldata totalEarnedAmounts, bytes32[][] calldata proofs)
+    external onlyRole(KEEPER_ROLE)
+```
+
+#### Admin 函数
+
+```solidity
+// 紧急立即激活 Root
+function emergencyActivateRoot() external onlyRole(ADMIN_ROLE)
+
+// 取消待生效 Root
+function cancelPendingRoot() external onlyRole(ADMIN_ROLE)
+
+// 重置用户已领取数量
+function resetUserClaimed(address user, uint256 newAmount) external onlyRole(ADMIN_ROLE)
+```
+
+---
+
+## PenaltyModule (惩罚模块)
+
+### 功能概述
+
+链下计算惩罚积分，通过 Merkle proof 同步到链上。
+
+### 常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| `BASIS_POINTS` | `10000` | 基点 (100%) |
+| `MAX_BATCH_SIZE` | `100` | 批量同步最大数量 |
+| `ROOT_DELAY` | `24 hours` | Root 生效延迟 |
+| `MAX_ROOT_HISTORY` | `100` | Root 历史最大保留数 |
+
+### 状态变量
+
+| 变量 | 类型 | 描述 |
+|------|------|------|
+| `penaltyRoot` | `bytes32` | 当前 Penalty Merkle Root |
+| `confirmedPenalty` | `mapping(address => uint256)` | 用户确认的惩罚积分 |
+| `penaltyRateBps` | `uint256` | 惩罚率 (基点) |
+| `pendingRoot` | `bytes32` | 待生效 Root |
+| `pendingRootEffectiveTime` | `uint256` | 待生效时间 |
+
+### Merkle Leaf 格式
+
+```solidity
+leaf = keccak256(bytes.concat(keccak256(abi.encode(userAddress, totalCumulativePenalty))))
+```
+
+### 核心函数
+
+```solidity
+// IPenaltyModule 实现
+function getPenalty(address user) external view returns (uint256)
+
+// 同步惩罚
+function syncPenalty(address user, uint256 totalPenalty, bytes32[] calldata proof) external nonReentrant whenNotPaused
+function batchSyncPenalty(address[] calldata users, uint256[] calldata totalPenalties, bytes32[][] calldata proofs) external onlyRole(KEEPER_ROLE)
+
+// 验证
+function verifyPenalty(address user, uint256 totalPenalty, bytes32[] calldata proof) public view returns (bool)
+
+// 计算惩罚 (参考)
+function calculatePenalty(uint256 redemptionAmount) external view returns (uint256)
+
+// Keeper
+function updatePenaltyRoot(bytes32 newRoot) external onlyRole(KEEPER_ROLE)
+function activateRoot() external
+
+// Admin
+function emergencyActivateRoot() external onlyRole(ADMIN_ROLE)
+function cancelPendingRoot() external onlyRole(ADMIN_ROLE)
+function setPenaltyRate(uint256 newRateBps) external onlyRole(ADMIN_ROLE)
+function setUserPenalty(address user, uint256 penalty) external onlyRole(ADMIN_ROLE)
+function batchSetPenalties(address[] calldata users, uint256[] calldata penalties) external onlyRole(ADMIN_ROLE)
+```
+
+**注意:** 惩罚只能增加，不能减少 (`PenaltyCannotDecrease` 错误)。
+
+---
+
+## 接口定义
+
+### IPointsModule
+
+```solidity
+interface IPointsModule {
+    function getPoints(address user) external view returns (uint256);
+    function moduleName() external view returns (string memory);
+    function isActive() external view returns (bool);
+}
+```
+
+### IPenaltyModule
+
+```solidity
+interface IPenaltyModule {
+    function getPenalty(address user) external view returns (uint256);
+}
+```
+
+### IPointsHub
+
+```solidity
+interface IPointsHub {
+    function getTotalPoints(address user) external view returns (uint256);
+    function getPenaltyPoints(address user) external view returns (uint256);
+    function getClaimablePoints(address user) external view returns (uint256);
+    function redeem(uint256 pointsAmount) external;
+}
+```
+
+### IPPT
+
+```solidity
+interface IPPT {
+    function balanceOf(address account) external view returns (uint256);
+    function effectiveSupply() external view returns (uint256);
+    function totalSupply() external view returns (uint256);
+}
+```
+
+---
+
+## 角色权限
+
+### 角色定义
+
+| 角色 | bytes32 | 描述 |
+|------|---------|------|
+| `DEFAULT_ADMIN_ROLE` | `0x00` | OpenZeppelin 默认管理员 |
+| `ADMIN_ROLE` | `keccak256("ADMIN_ROLE")` | 配置管理 |
+| `KEEPER_ROLE` | `keccak256("KEEPER_ROLE")` | 日常运维 (checkpoint, root 更新) |
+| `UPGRADER_ROLE` | `keccak256("UPGRADER_ROLE")` | 合约升级 (建议使用 Timelock) |
+
+### 权限矩阵
+
+| 操作 | ADMIN | KEEPER | UPGRADER | Public |
+|------|-------|--------|----------|--------|
+| 模块注册/移除 | Y | - | - | - |
+| 设置兑换率 | Y | - | - | - |
+| 暂停/恢复 | Y | - | - | - |
+| Checkpoint 全局 | - | Y | - | - |
+| Checkpoint 批量用户 | - | Y | - | - |
+| 更新 Merkle Root | - | Y | - | - |
+| Checkpoint 单用户 | - | - | - | Y |
+| Checkpoint 自己 | - | - | - | Y |
+| 领取积分 | - | - | - | Y |
+| 兑换积分 | - | - | - | Y |
+| 合约升级 | - | - | Y | - |
+
+---
+
+## 部署指南
+
+### 部署顺序
+
+```
+1. 部署 Mocks (测试环境)
+   - MockPPT, MockERC20 (Reward Token, LP Tokens)
+
+2. 部署 PointsHub
+   - initialize(admin, upgrader)
+
+3. 部署 Points Modules
+   - HoldingModule.initialize(ppt, admin, keeper, upgrader, pointsRatePerSecond)
+   - StakingModule.initialize(ppt, admin, keeper, upgrader, pointsRatePerSecond)
+   - LPModule.initialize(admin, keeper, upgrader, baseRate)
+   - ActivityModule.initialize(admin, keeper, upgrader)
+
+4. 部署 PenaltyModule
+   - initialize(admin, keeper, upgrader, penaltyRateBps)
+
+5. 配置 PointsHub
+   - registerModule(holdingModule 或 stakingModule)
+   - registerModule(lpModule)
+   - registerModule(activityModule)
+   - setPenaltyModule(penaltyModule)
+   - setRewardToken(rewardToken)
+   - setExchangeRate(rate)
+
+6. 配置 LPModule
+   - addPool(lpToken, multiplier, name) x N
+
+7. 充值 Reward Token 到 PointsHub
+```
+
+### 部署脚本示例
+
+```solidity
+// script/DeployStakingModule.s.sol
+pragma solidity ^0.8.24;
+
+import {Script} from "forge-std/Script.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {StakingModule} from "../src/StakingModule.sol";
+
+contract DeployStakingModule is Script {
+    function run() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        address ppt = vm.envAddress("PPT_ADDRESS");
+        address admin = vm.envAddress("ADMIN_ADDRESS");
+        address keeper = vm.envAddress("KEEPER_ADDRESS");
+        address upgrader = vm.envAddress("UPGRADER_ADDRESS");
+        uint256 pointsRatePerSecond = vm.envUint("POINTS_RATE_PER_SECOND");
+
+        vm.startBroadcast(deployerPrivateKey);
+
+        // 1. 部署实现
+        StakingModule impl = new StakingModule();
+
+        // 2. 部署代理
+        bytes memory initData = abi.encodeWithSelector(
+            StakingModule.initialize.selector,
+            ppt,
+            admin,
+            keeper,
+            upgrader,
+            pointsRatePerSecond
+        );
+        StakingModule module = StakingModule(
+            address(new ERC1967Proxy(address(impl), initData))
+        );
+
+        vm.stopBroadcast();
+    }
+}
+```
+
+---
+
+## 安全机制
+
+### 1. UUPS 升级模式
+
+所有合约使用 UUPS Upgradeable pattern：
+- 构造函数调用 `_disableInitializers()` 防止实现合约被初始化
+- 升级权限由 `UPGRADER_ROLE` 控制 (建议使用 Timelock)
+- `__gap[50]` 存储间隙预留未来升级空间
+
+### 2. Flash Loan 防护
+
+```solidity
+// 检查是否通过持有期
+bool passedHoldingPeriod = lastCheckpointBlock == 0
+    || block.number >= lastCheckpointBlock + minHoldingBlocks;
+
+// 只有通过持有期才计入积分
+if (passedHoldingPeriod) {
+    userPointsEarned += newEarned;
+}
+```
+
+### 3. Merkle Root 延迟激活
+
+ActivityModule 和 PenaltyModule 的 Root 更新有 24 小时延迟：
+
+```
+updateMerkleRoot() -> pendingRoot (等待 24h) -> activateRoot() -> merkleRoot
+```
+
+### 4. Gas 限制保护
+
+PointsHub 调用模块时使用 gas limit 防止恶意模块 DoS：
+
+```solidity
+(bool success, bytes memory data) = moduleAddr.staticcall{gas: moduleGasLimit}(
+    abi.encodeWithSelector(IPointsModule.getPoints.selector, user)
+);
+```
+
+### 5. 重入防护
+
+关键函数使用 `ReentrancyGuard`：
+- `redeem()`
+- `stake()` / `unstake()`
+- `claim()` / `syncPenalty()`
+
+### 6. SafeERC20
+
+所有 Token 操作使用 `SafeERC20`：
+- `safeTransfer()`
+- `safeTransferFrom()`
+
+---
+
+## Gas 估算
+
+| 操作 | Gas | 说明 |
+|------|-----|------|
+| `PointsHub.getTotalPoints()` | ~20,000 - 50,000 | 取决于模块数量 |
+| `PointsHub.redeem()` | ~80,000 | 含 ERC20 转账 |
+| `HoldingModule.getPoints()` | ~5,000 | O(1) |
+| `HoldingModule.checkpoint()` | ~30,000 | 单用户 |
+| `StakingModule.getPoints()` | ~5,000 | O(1) |
+| `StakingModule.stake()` | ~80,000 | 含 ERC20 转账 |
+| `StakingModule.unstake()` | ~60,000 | 含 ERC20 转账 |
+| `LPModule.getPoints()` | ~10,000 - 40,000 | 取决于池数量 |
+| `ActivityModule.claim()` | ~50,000 | 含 Merkle 验证 |
+| `PenaltyModule.syncPenalty()` | ~40,000 | 含 Merkle 验证 |
+
+---
+
+## 测试
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/rocky2431/paimon-point-contract.git
-cd paimon-point-contract
-
-# Or if already cloned without submodules
-git submodule update --init --recursive
-
-# Build
+# 编译
 forge build
 
-# Test
+# 运行所有测试
 forge test
 
-# Gas report
+# 详细输出
+forge test -vvv
+
+# 运行特定测试
+forge test --match-contract StakingModuleTest
+
+# Gas 报告
 forge test --gas-report
+
+# CI 模式 (更多 fuzz 测试)
+forge test --profile ci
+
+# 覆盖率
+forge coverage
 ```
 
-## Dependencies
+### 测试文件
+
+| 文件 | 测试数 | 描述 |
+|------|--------|------|
+| `test/StakingModule.t.sol` | 88 | 质押模块全面测试 |
+| `test/HoldingModule.t.sol` | - | 持有模块测试 |
+| `test/LPModule.t.sol` | - | LP 模块测试 |
+| `test/ActivityModule.t.sol` | - | 活动模块测试 |
+| `test/PenaltyModule.t.sol` | - | 惩罚模块测试 |
+| `test/PointsHub.t.sol` | - | 聚合器测试 |
+| `test/Integration.t.sol` | - | 集成测试 |
+| `test/Security.t.sol` | - | 安全测试 |
+
+---
+
+## 依赖
 
 - [OpenZeppelin Contracts v5.0.2](https://github.com/OpenZeppelin/openzeppelin-contracts)
 - [OpenZeppelin Contracts Upgradeable v5.0.2](https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable)
 - [Forge Std](https://github.com/foundry-rs/forge-std)
 
-## Usage
+## 许可证
 
-### Deployment Order
-
-1. Deploy implementation contracts
-2. Deploy proxy contracts pointing to implementations
-3. Initialize each module with appropriate roles
-4. Register modules in PointsHub
-5. Configure parameters (rates, multipliers, etc.)
-
-### Roles
-
-| Role | Permissions |
-|------|-------------|
-| `ADMIN_ROLE` | Configure parameters, pause/unpause, register modules |
-| `KEEPER_ROLE` | Update Merkle roots, trigger checkpoints |
-| `UPGRADER_ROLE` | Upgrade contract implementations |
-
-### Points Calculation
-
-**Holding Module** (Synthetix-style):
-```
-userPoints = balance × (currentPointsPerShare - userPointsPerSharePaid)
-```
-
-**LP Module**:
-```
-poolPoints = lpBalance × (pointsPerLP - userPointsPerLPPaid) × multiplier
-```
-
-**Activity Module**: Computed off-chain, verified via Merkle proof
-
-### Redemption
-
-```solidity
-// Check claimable points
-uint256 claimable = pointsHub.getClaimablePoints(user);
-
-// Redeem points for tokens
-pointsHub.redeem(pointsAmount);
-```
-
-## Configuration
-
-### foundry.toml
-
-```toml
-[profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
-solc_version = "0.8.24"
-optimizer = true
-optimizer_runs = 200
-```
-
-### Environment Variables
-
-```bash
-# For deployment scripts
-PRIVATE_KEY=your_private_key
-RPC_URL=your_rpc_url
-ETHERSCAN_API_KEY=your_api_key
-```
-
-## Security
-
-- All contracts are upgradeable with proper access control
-- Keeper functions are rate-limited by role
-- Merkle proofs prevent unauthorized claims
-- Reentrancy protection on all state-changing functions
-
-## License
-
-MIT
-
-## Links
-
-- [Design Documentation](./POINTS_SYSTEM_DESIGN.md)
-- [Paimon Protocol](https://paimon.finance)
+MIT License
