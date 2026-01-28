@@ -18,14 +18,13 @@ forge fmt --check                        # Check formatting
 
 ## Architecture Overview
 
-Modular on-chain points system v1.3.0 with Hub-Module pattern:
+Modular on-chain points system v2.0.0 with Hub-Module pattern (Credit Card Mode):
 
 ```
 PointsHub (中央聚合器)
     │
     ├── IPointsModule 接口
-    │   ├── HoldingModule   (PPT 持有积分, Synthetix-style)
-    │   ├── StakingModule   (PPT 锁定质押 + Boost 倍数)
+    │   ├── StakingModule   (PPT 质押 - 灵活/锁定 + Boost 倍数)
     │   ├── LPModule        (LP 多池质押)
     │   └── ActivityModule  (Merkle proof 链下活动)
     │
@@ -35,20 +34,26 @@ PointsHub (中央聚合器)
 
 **Formula**: `claimablePoints = Σ modules.getPoints(user) - penalty - redeemedPoints`
 
+### Credit Card Points Mode (v2.0)
+
+与 Synthetix 风格的"瓜分池子"模式不同，信用卡模式保证后入者与早入者在同等条件下获得同等积分：
+- **无全局状态**：每个用户的积分独立计算，不受他人影响
+- **固定积分率**：`points = amount × rate × duration`
+- **无稀释效应**：后入者不会被早期参与者稀释
+
 ### Module Algorithms
 
 | Module | Source | Algorithm |
 |--------|--------|-----------|
-| HoldingModule | PPT balanceOf | `points = balance × (pointsPerShare - paid)` |
-| StakingModule | Locked PPT | `boostedAmount = amount × boost` (7d=1.02x, 365d=2.0x) |
-| LPModule | LP balances | `points × multiplier / 100` per pool |
+| StakingModule | Staked PPT | `points = amount × boost × pointsRatePerSecond × duration / BOOST_BASE` |
+| LPModule | LP balances | `points = balance × (baseRate × multiplier / MULTIPLIER_BASE) × duration` |
 | ActivityModule | Merkle tree | `leaf = keccak256(keccak256(abi.encode(user, amount)))` |
 | PenaltyModule | Merkle tree | Same Merkle format, penalty only increases |
 
 ### Checkpoint Mechanism
 
-HoldingModule, StakingModule, LPModule 使用检查点系统防止闪电贷攻击：
-- **Keeper**: `checkpointGlobal()` + `checkpointUsers(address[])` 定期调用
+StakingModule, LPModule 使用检查点系统防止闪电贷攻击：
+- **Keeper**: `checkpointUsers(address[])` 批量检查点用户
 - **User**: `checkpoint(user)` 或 `checkpointSelf()` 随时调用
 - **Flash loan protection**: 需持有 `minHoldingBlocks` 个区块后积分才生效
 
@@ -73,15 +78,24 @@ updateMerkleRoot() → pendingRoot → (24h) → activateRoot() → merkleRoot
 ```
 Admin 可通过 `emergencyActivateRoot()` 跳过延迟。
 
-### StakingModule Boost Table
+### StakingModule v2.0
 
+**质押类型**:
+| Type | Boost | Description |
+|------|-------|-------------|
+| Flexible | 1.0x | 随时取出，无锁定 |
+| Locked | 1.02x~2.0x | 锁定期内 boost 加成，到期后自动降为 1.0x |
+
+**Boost 计算表**:
 | Lock Duration | Boost | Formula |
 |--------------|-------|---------|
+| Flexible | 1.0x | `BOOST_BASE (10000)` |
 | 7 days (min) | 1.02x | `10000 + (7 × 10000 / 365)` |
 | 90 days | 1.25x | `10000 + (90 × 10000 / 365)` |
 | 365 days (max) | 2.0x | `10000 + (365 × 10000 / 365)` |
 
-Early unlock penalty: `earnedSinceStake × (remainingTime / lockDuration) × 50%`
+**锁定到期行为**: 锁定到期后 boost 自动降为 1.0x，用户无需手动操作
+**提前解锁惩罚**: `earnedPoints × (remainingTime / lockDuration) × 50%`
 
 ## Test Infrastructure
 

@@ -5,10 +5,10 @@ import {Test, console} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {PointsHub} from "../src/PointsHub.sol";
-import {HoldingModule} from "../src/HoldingModule.sol";
 import {LPModule} from "../src/LPModule.sol";
 import {ActivityModule} from "../src/ActivityModule.sol";
 import {PenaltyModule} from "../src/PenaltyModule.sol";
+import {StakingModule} from "../src/StakingModule.sol";
 
 import {MockPPT} from "./mocks/MockPPT.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -16,10 +16,10 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 abstract contract BaseTest is Test {
     // Contracts
     PointsHub public pointsHub;
-    HoldingModule public holdingModule;
     LPModule public lpModule;
     ActivityModule public activityModule;
     PenaltyModule public penaltyModule;
+    StakingModule public stakingModule;
 
     // Mocks
     MockPPT public ppt;
@@ -37,8 +37,9 @@ abstract contract BaseTest is Test {
 
     // Constants
     uint256 public constant PRECISION = 1e18;
-    uint256 public constant POINTS_RATE_PER_SECOND = 1e15; // 0.001 points per second per PPT
-    uint256 public constant LP_BASE_RATE = 1e15;
+    uint256 public constant POINTS_RATE_PER_SECOND = 1; // 1 point per second per PPT (minimal rate)
+    uint256 public constant LP_BASE_RATE = 1; // 1 point per second per LP (minimal rate)
+    uint256 public constant STAKING_RATE = 1; // 1 point per second per staked PPT (minimal rate)
     uint256 public constant EXCHANGE_RATE = 1e18; // 1:1
     uint256 public constant PENALTY_RATE_BPS = 1000; // 10%
 
@@ -53,13 +54,6 @@ abstract contract BaseTest is Test {
         PointsHub hubImpl = new PointsHub();
         bytes memory hubData = abi.encodeWithSelector(PointsHub.initialize.selector, admin, upgrader);
         pointsHub = PointsHub(address(new ERC1967Proxy(address(hubImpl), hubData)));
-
-        // Deploy and initialize HoldingModule
-        HoldingModule holdingImpl = new HoldingModule();
-        bytes memory holdingData = abi.encodeWithSelector(
-            HoldingModule.initialize.selector, address(ppt), admin, keeper, upgrader, POINTS_RATE_PER_SECOND
-        );
-        holdingModule = HoldingModule(address(new ERC1967Proxy(address(holdingImpl), holdingData)));
 
         // Deploy and initialize LPModule
         LPModule lpImpl = new LPModule();
@@ -78,9 +72,16 @@ abstract contract BaseTest is Test {
             abi.encodeWithSelector(PenaltyModule.initialize.selector, admin, keeper, upgrader, PENALTY_RATE_BPS);
         penaltyModule = PenaltyModule(address(new ERC1967Proxy(address(penaltyImpl), penaltyData)));
 
+        // Deploy and initialize StakingModule
+        StakingModule stakingImpl = new StakingModule();
+        bytes memory stakingData = abi.encodeWithSelector(
+            StakingModule.initialize.selector, address(ppt), admin, keeper, upgrader, STAKING_RATE
+        );
+        stakingModule = StakingModule(address(new ERC1967Proxy(address(stakingImpl), stakingData)));
+
         // Setup PointsHub - register modules
         vm.startPrank(admin);
-        pointsHub.registerModule(address(holdingModule));
+        pointsHub.registerModule(address(stakingModule));
         pointsHub.registerModule(address(lpModule));
         pointsHub.registerModule(address(activityModule));
         pointsHub.setPenaltyModule(address(penaltyModule));
@@ -94,8 +95,8 @@ abstract contract BaseTest is Test {
         lpModule.addPool(address(lpToken2), 200, "LP Pool 2"); // 2x multiplier
         vm.stopPrank();
 
-        // Mint reward tokens to PointsHub
-        rewardToken.mint(address(pointsHub), 1_000_000 * 1e18);
+        // Mint reward tokens to PointsHub (large amount to cover accumulated points in tests)
+        rewardToken.mint(address(pointsHub), 1_000_000_000_000 * 1e18);
     }
 
     // Helper function to generate Merkle tree for testing

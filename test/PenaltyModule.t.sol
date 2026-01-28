@@ -348,10 +348,14 @@ contract PenaltyModuleTest is BaseTest {
     // ============================================
 
     function test_penaltyAffectsClaimablePoints() public {
-        // Setup: user earns points
+        // Setup: user earns points by staking
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         uint256 totalPoints = pointsHub.getTotalPoints(user1);

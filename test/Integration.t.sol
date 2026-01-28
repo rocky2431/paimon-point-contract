@@ -13,27 +13,32 @@ contract IntegrationTest is BaseTest {
     // ============================================
 
     function test_fullUserJourney() public {
-        // Step 1: User deposits PPT and LP tokens
+        // Step 1: User stakes PPT and deposits LP tokens
         ppt.mint(user1, 1000 * 1e18);
         lpToken1.mint(user1, 500 * 1e18);
 
-        // Step 2: Keeper checkpoints user
-        vm.startPrank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
-        lpModule.checkpointUsers(toArray(user1));
+        // Stake PPT
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
         vm.stopPrank();
 
-        // Step 3: Time passes (1 week)
+        // Step 2: Checkpoint LP for user
+        vm.prank(user1);
+        lpModule.checkpointSelf();
+
+        // Step 3: Advance blocks to pass flash loan protection, then advance time (1 week)
+        _advanceBlocks(2);
         _advanceTime(7 days);
 
         // Step 4: Verify points accumulated
-        uint256 holdingPoints = holdingModule.getPoints(user1);
+        uint256 stakingPoints = stakingModule.getPoints(user1);
         uint256 lpPoints = lpModule.getPoints(user1);
         uint256 totalPoints = pointsHub.getTotalPoints(user1);
 
-        assertGt(holdingPoints, 0);
+        assertGt(stakingPoints, 0);
         assertGt(lpPoints, 0);
-        assertEq(totalPoints, holdingPoints + lpPoints);
+        assertEq(totalPoints, stakingPoints + lpPoints);
 
         // Step 5: User claims activity points (if any)
         // Setup activity merkle tree
@@ -51,11 +56,11 @@ contract IntegrationTest is BaseTest {
         activityModule.claim(amounts[0], proof);
 
         // Step 6: Verify total points includes activity
-        // Note: Time has advanced due to ROOT_DELAY, so holding/lp points may have increased
-        uint256 newHoldingPoints = holdingModule.getPoints(user1);
+        // Note: Time has advanced due to ROOT_DELAY, so staking/lp points may have increased
+        uint256 newStakingPoints = stakingModule.getPoints(user1);
         uint256 newLpPoints = lpModule.getPoints(user1);
         uint256 newTotalPoints = pointsHub.getTotalPoints(user1);
-        assertEq(newTotalPoints, newHoldingPoints + newLpPoints + amounts[0]);
+        assertEq(newTotalPoints, newStakingPoints + newLpPoints + amounts[0]);
 
         // Step 7: Enable redemption and redeem points
         vm.prank(admin);
@@ -77,39 +82,52 @@ contract IntegrationTest is BaseTest {
         assertEq(pointsHub.getClaimablePoints(user1), 0);
     }
 
-    function test_multipleUsersCompeting() public {
-        // Setup: 3 users with different holdings
+    function test_multipleUsersStaking() public {
+        // Setup: 3 users with different staking amounts
         ppt.mint(user1, 3000 * 1e18); // 50%
         ppt.mint(user2, 2000 * 1e18); // 33%
         ppt.mint(user3, 1000 * 1e18); // 17%
 
-        // Checkpoint all
-        vm.prank(keeper);
-        address[] memory users = new address[](3);
-        users[0] = user1;
-        users[1] = user2;
-        users[2] = user3;
-        holdingModule.checkpointUsers(users);
+        // All users stake
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 3000 * 1e18);
+        stakingModule.stakeFlexible(3000 * 1e18);
+        vm.stopPrank();
 
-        // Advance time
+        vm.startPrank(user2);
+        ppt.approve(address(stakingModule), 2000 * 1e18);
+        stakingModule.stakeFlexible(2000 * 1e18);
+        vm.stopPrank();
+
+        vm.startPrank(user3);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        // Advance time and blocks
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
-        // Check proportional points
-        uint256 points1 = holdingModule.getPoints(user1);
-        uint256 points2 = holdingModule.getPoints(user2);
-        uint256 points3 = holdingModule.getPoints(user3);
+        // Check proportional points (Credit Card Mode: points = amount × rate × time)
+        uint256 points1 = stakingModule.getPoints(user1);
+        uint256 points2 = stakingModule.getPoints(user2);
+        uint256 points3 = stakingModule.getPoints(user3);
 
-        // User1 should have ~3x user3's points
+        // User1 should have exactly 3x user3's points (same time, 3x amount)
         assertApproxEqRel(points1, points3 * 3, 0.01e18);
-        // User2 should have ~2x user3's points
+        // User2 should have exactly 2x user3's points
         assertApproxEqRel(points2, points3 * 2, 0.01e18);
     }
 
     function test_penaltyReducesClaimable() public {
-        // Setup: User earns points
+        // Setup: User stakes and earns points
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         uint256 totalPoints = pointsHub.getTotalPoints(user1);
@@ -127,36 +145,40 @@ contract IntegrationTest is BaseTest {
     function test_moduleDeactivation() public {
         // Setup
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
-        uint256 pointsBefore = holdingModule.getPoints(user1);
+        uint256 pointsBefore = stakingModule.getPoints(user1);
         assertGt(pointsBefore, 0);
 
-        // Checkpoint before deactivation to lock in points
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
-
-        // Deactivate holding module
+        // Deactivate staking module
         vm.prank(admin);
-        holdingModule.setActive(false);
+        stakingModule.setActive(false);
 
-        // Points immediately after deactivation should be preserved in userPointsEarned
-        uint256 pointsAtDeactivation = holdingModule.getPoints(user1);
+        // Points immediately after deactivation
+        uint256 pointsAtDeactivation = stakingModule.getPoints(user1);
 
         _advanceTime(1 days);
 
         // Points should not increase after deactivation
-        uint256 pointsAfter = holdingModule.getPoints(user1);
+        uint256 pointsAfter = stakingModule.getPoints(user1);
         assertEq(pointsAfter, pointsAtDeactivation);
     }
 
     function test_partialRedemptions() public {
         // Setup
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(7 days);
 
         vm.prank(admin);
@@ -190,12 +212,17 @@ contract IntegrationTest is BaseTest {
         lpToken1.mint(user1, 500 * 1e18);
         lpToken2.mint(user1, 300 * 1e18);
 
-        // Checkpoint
-        vm.startPrank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
-        lpModule.checkpointUsers(toArray(user1));
+        // Stake PPT
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
         vm.stopPrank();
 
+        // Checkpoint LP
+        vm.prank(user1);
+        lpModule.checkpointSelf();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         // Add activity points
@@ -221,7 +248,7 @@ contract IntegrationTest is BaseTest {
             pointsHub.getPointsBreakdown(user1);
 
         assertEq(names.length, 3);
-        assertGt(points[0], 0); // HoldingModule
+        assertGt(points[0], 0); // StakingModule
         assertGt(points[1], 0); // LPModule
         assertEq(points[2], amounts[0]); // ActivityModule
         assertEq(penalty, 500 * 1e18);
@@ -234,8 +261,12 @@ contract IntegrationTest is BaseTest {
     function test_exchangeRateChange() public {
         // Setup
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         vm.prank(admin);
@@ -258,43 +289,51 @@ contract IntegrationTest is BaseTest {
     function test_moduleRemovalDoesNotAffectExistingPoints() public {
         // Setup and earn points
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
-        uint256 holdingPoints = holdingModule.getPoints(user1);
+        uint256 stakingPoints = stakingModule.getPoints(user1);
         uint256 totalBefore = pointsHub.getTotalPoints(user1);
 
-        // Remove holding module from PointsHub
+        // Remove staking module from PointsHub
         vm.prank(admin);
-        pointsHub.removeModule(address(holdingModule));
+        pointsHub.removeModule(address(stakingModule));
 
-        // Total points should now exclude holding module
+        // Total points should now exclude staking module
         uint256 totalAfter = pointsHub.getTotalPoints(user1);
-        assertEq(totalAfter, totalBefore - holdingPoints);
+        assertEq(totalAfter, totalBefore - stakingPoints);
 
-        // But HoldingModule still tracks points internally
-        assertEq(holdingModule.getPoints(user1), holdingPoints);
+        // But StakingModule still tracks points internally
+        assertEq(stakingModule.getPoints(user1), stakingPoints);
     }
 
     // ============================================
     // Edge Cases
     // ============================================
 
-    function test_zeroBalanceNoPoints() public {
-        // Checkpoint user with no balance
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+    function test_zeroStakeNoPoints() public {
+        // User has PPT but doesn't stake
+        ppt.mint(user1, 1000 * 1e18);
 
         _advanceTime(1 days);
 
-        assertEq(holdingModule.getPoints(user1), 0);
+        // No staking = no points
+        assertEq(stakingModule.getPoints(user1), 0);
     }
 
     function test_redeemExactlyClaimable() public {
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         vm.prank(admin);
@@ -308,24 +347,65 @@ contract IntegrationTest is BaseTest {
         assertEq(pointsHub.getClaimablePoints(user1), 0);
     }
 
-    function test_concurrentCheckpoints() public {
+    function test_concurrentStakes() public {
         ppt.mint(user1, 1000 * 1e18);
         ppt.mint(user2, 1000 * 1e18);
 
-        // Both users checkpoint at same time
-        vm.prank(user1);
-        holdingModule.checkpointSelf();
+        // Both users stake at same time
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
 
-        vm.prank(user2);
-        holdingModule.checkpointSelf();
+        vm.startPrank(user2);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
 
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
-        // Both should have equal points
-        uint256 points1 = holdingModule.getPoints(user1);
-        uint256 points2 = holdingModule.getPoints(user2);
+        // Both should have equal points (Credit Card Mode)
+        uint256 points1 = stakingModule.getPoints(user1);
+        uint256 points2 = stakingModule.getPoints(user2);
 
         assertApproxEqRel(points1, points2, 0.01e18);
+    }
+
+    function test_lateEntrantNotDiluted() public {
+        // User1 stakes first
+        ppt.mint(user1, 1000 * 1e18);
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
+        _advanceTime(1 days);
+
+        // Record user1's points earned in day 1
+        uint256 user1PointsDay1 = stakingModule.getPoints(user1);
+
+        // User2 enters later (day 2)
+        ppt.mint(user2, 1000 * 1e18);
+        vm.startPrank(user2);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
+        _advanceTime(1 days);
+
+        // User2's points from day 2
+        uint256 user2Points = stakingModule.getPoints(user2);
+
+        // User1's points from day 2 (day 2 only, not cumulative)
+        uint256 user1TotalPoints = stakingModule.getPoints(user1);
+        uint256 user1PointsDay2 = user1TotalPoints - user1PointsDay1;
+
+        // Credit Card Mode: User2's full day = User1's day 2 portion
+        // Both staked same amount for same duration on day 2
+        assertApproxEqRel(user2Points, user1PointsDay2, 0.01e18);
     }
 
     // ============================================

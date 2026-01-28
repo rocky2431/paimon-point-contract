@@ -41,13 +41,13 @@ contract PointsHubTest is BaseTest {
 
     function test_moduleRegistration() public view {
         assertEq(pointsHub.getModuleCount(), 3);
-        assertTrue(pointsHub.isModule(address(holdingModule)));
+        assertTrue(pointsHub.isModule(address(stakingModule)));
         assertTrue(pointsHub.isModule(address(lpModule)));
         assertTrue(pointsHub.isModule(address(activityModule)));
     }
 
     function test_registerModule_onlyAdmin() public {
-        address newModule = address(holdingModule); // Just for testing
+        address newModule = address(stakingModule); // Just for testing
 
         vm.prank(user1);
         vm.expectRevert();
@@ -56,10 +56,10 @@ contract PointsHubTest is BaseTest {
 
     function test_removeModule() public {
         vm.prank(admin);
-        pointsHub.removeModule(address(holdingModule));
+        pointsHub.removeModule(address(stakingModule));
 
         assertEq(pointsHub.getModuleCount(), 2);
-        assertFalse(pointsHub.isModule(address(holdingModule)));
+        assertFalse(pointsHub.isModule(address(stakingModule)));
     }
 
     function test_revert_removeModule_notFound() public {
@@ -70,8 +70,8 @@ contract PointsHubTest is BaseTest {
 
     function test_revert_registerModule_alreadyRegistered() public {
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(PointsHub.ModuleAlreadyRegistered.selector, address(holdingModule)));
-        pointsHub.registerModule(address(holdingModule));
+        vm.expectRevert(abi.encodeWithSelector(PointsHub.ModuleAlreadyRegistered.selector, address(stakingModule)));
+        pointsHub.registerModule(address(stakingModule));
     }
 
     // ============================================
@@ -83,30 +83,33 @@ contract PointsHubTest is BaseTest {
         assertEq(points, 0);
     }
 
-    function test_getTotalPoints_withHolding() public {
-        // Setup: user1 holds PPT
+    function test_getTotalPoints_withStaking() public {
+        // Setup: user1 stakes PPT
         ppt.mint(user1, 1000 * 1e18);
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
 
-        // Checkpoint user
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
-
-        // Advance time
+        // Advance blocks and time
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         uint256 points = pointsHub.getTotalPoints(user1);
-        // Expected: 1000 PPT * 1 day * pointsRate / effectiveSupply
-        // = 1000 * 86400 * 1e15 / 1000 = 86400 * 1e15
+        // Expected: 1000 PPT * 1 day * pointsRate
+        // Credit card mode: fixed rate per staked token
         assertGt(points, 0);
     }
 
     function test_getClaimablePoints() public {
-        // Setup: user1 holds PPT
+        // Setup: user1 stakes PPT
         ppt.mint(user1, 1000 * 1e18);
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
 
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
-
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         uint256 claimable = pointsHub.getClaimablePoints(user1);
@@ -116,15 +119,19 @@ contract PointsHubTest is BaseTest {
     function test_getPointsBreakdown() public {
         // Setup
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         (string[] memory names, uint256[] memory points, uint256 penalty, uint256 redeemed, uint256 claimable) =
             pointsHub.getPointsBreakdown(user1);
 
         assertEq(names.length, 3);
-        assertEq(names[0], "PPT Holding");
+        assertEq(names[0], "PPT Staking");
         assertGt(points[0], 0);
         assertEq(penalty, 0);
         assertEq(redeemed, 0);
@@ -138,8 +145,12 @@ contract PointsHubTest is BaseTest {
     function test_redeem_success() public {
         // Setup: user1 earns points
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         // Enable redemption
@@ -162,8 +173,12 @@ contract PointsHubTest is BaseTest {
     function test_redeem_partial() public {
         // Setup
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         vm.prank(admin);
@@ -182,8 +197,12 @@ contract PointsHubTest is BaseTest {
 
     function test_revert_redeem_notEnabled() public {
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         vm.prank(user1);
@@ -211,8 +230,12 @@ contract PointsHubTest is BaseTest {
 
     function test_revert_redeem_exceedsMaxPerTx() public {
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         vm.startPrank(admin);
@@ -228,8 +251,12 @@ contract PointsHubTest is BaseTest {
     function test_redeem_withPenalty() public {
         // Setup points
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
 
         // Setup penalty via admin
@@ -274,8 +301,12 @@ contract PointsHubTest is BaseTest {
 
         // Setup for redeem
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
+        _advanceBlocks(2);
         _advanceTime(1 days);
         vm.prank(admin);
         pointsHub.setRedeemEnabled(true);

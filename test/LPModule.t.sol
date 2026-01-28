@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {BaseTest} from "./Base.t.sol";
 import {LPModule} from "../src/LPModule.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
 
 contract LPModuleTest is BaseTest {
     function setUp() public override {
@@ -10,11 +11,20 @@ contract LPModuleTest is BaseTest {
     }
 
     // ============================================
+    // Helper Functions
+    // ============================================
+
+    function _mintLpTokens(address user, uint256 amount1, uint256 amount2) internal {
+        lpToken1.mint(user, amount1);
+        lpToken2.mint(user, amount2);
+    }
+
+    // ============================================
     // Initialization Tests
     // ============================================
 
     function test_initialization() public view {
-        assertEq(lpModule.VERSION(), "1.3.0");
+        assertEq(lpModule.VERSION(), "2.0.0");
         assertEq(lpModule.MODULE_NAME(), "LP Providing");
         assertEq(lpModule.basePointsRatePerSecond(), LP_BASE_RATE);
         assertTrue(lpModule.isActive());
@@ -37,7 +47,7 @@ contract LPModuleTest is BaseTest {
 
         assertEq(lpModule.getPoolCount(), 3);
 
-        (address lpToken, uint256 multiplier, bool poolActive, string memory name,,) = lpModule.getPool(2);
+        (address lpToken, uint256 multiplier, bool poolActive, string memory name,) = lpModule.getPool(2);
 
         assertEq(lpToken, address(newLpToken));
         assertEq(multiplier, 150);
@@ -88,7 +98,7 @@ contract LPModuleTest is BaseTest {
         vm.prank(admin);
         lpModule.updatePool(0, 200, false);
 
-        (, uint256 multiplier, bool poolActive,,,) = lpModule.getPool(0);
+        (, uint256 multiplier, bool poolActive,,) = lpModule.getPool(0);
 
         assertEq(multiplier, 200);
         assertFalse(poolActive);
@@ -98,24 +108,165 @@ contract LPModuleTest is BaseTest {
         vm.prank(admin);
         lpModule.updatePoolName(0, "New Name");
 
-        (,,, string memory name,,) = lpModule.getPool(0);
-
+        (,,, string memory name,) = lpModule.getPool(0);
         assertEq(name, "New Name");
+    }
+
+    function test_removePool() public {
+        vm.prank(admin);
+        lpModule.removePool(0);
+
+        (address lpToken, uint256 multiplier, bool poolActive,,) = lpModule.getPool(0);
+        assertEq(lpToken, address(0));
+        assertEq(multiplier, 0);
+        assertFalse(poolActive);
+    }
+
+    function test_revert_updatePool_notFound() public {
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(LPModule.PoolNotFound.selector, 99));
+        lpModule.updatePool(99, 100, true);
+    }
+
+    // ============================================
+    // Credit Card Mode - Points Tests
+    // ============================================
+
+    function test_earnPoints_singlePool() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        // Initial checkpoint to record balance
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        // Advance time
+        _advanceTime(1 days);
+
+        // Check points
+        uint256 points = lpModule.getPoints(user1);
+
+        // Credit card mode: points = lpBalance * multiplier * baseRate * duration / MULTIPLIER_BASE
+        // Pool 0 has multiplier 100 (1x)
+        uint256 expectedRate = (LP_BASE_RATE * 100) / 100; // 1x
+        uint256 expected = lpAmount * expectedRate * 1 days;
+        assertEq(points, expected, "Points should match expected");
+    }
+
+    function test_earnPoints_multiplePoolsWithMultipliers() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, lpAmount);
+
+        // Initial checkpoint
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        // Advance time
+        _advanceTime(1 days);
+
+        // Check points
+        uint256 points = lpModule.getPoints(user1);
+
+        // Pool 0: multiplier 100 (1x)
+        // Pool 1: multiplier 200 (2x)
+        uint256 rate1 = (LP_BASE_RATE * 100) / 100;
+        uint256 rate2 = (LP_BASE_RATE * 200) / 100;
+        uint256 expected = (lpAmount * rate1 * 1 days) + (lpAmount * rate2 * 1 days);
+        assertEq(points, expected, "Points should include both pools");
+    }
+
+    /// @notice Core test: late entrant should NOT be diluted
+    function test_lateEntrant_notDiluted() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+        _mintLpTokens(user2, lpAmount, 0);
+
+        // User1 checkpoints on day 1
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        // User2 checkpoints on day 2
+        _advanceBlocks(2);
+        lpModule.checkpoint(user2);
+
+        _advanceTime(1 days);
+
+        // Check points
+        uint256 points1 = lpModule.getPoints(user1);
+        uint256 points2 = lpModule.getPoints(user2);
+
+        // User1: 2 days of points
+        // User2: 1 day of points
+        uint256 expectedPerDay = lpAmount * LP_BASE_RATE * 1 days; // multiplier 100 = 1x
+
+        assertEq(points1, expectedPerDay * 2, "User1 should have 2 days of points");
+        assertEq(points2, expectedPerDay, "User2 should have 1 day of points");
+
+        // Key assertion: Same daily earning rate for equal stakes
+        assertEq(points1 / 2, points2, "Same daily earning rate for equal stakes");
+    }
+
+    /// @notice Test multiplier ratio is exact
+    function test_multiplierRatio_exact() public {
+        uint256 lpAmount = 1000e18;
+
+        // User1 in Pool 0 (1x)
+        lpToken1.mint(user1, lpAmount);
+        // User2 in Pool 1 (2x)
+        lpToken2.mint(user2, lpAmount);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+        lpModule.checkpoint(user2);
+
+        _advanceTime(1 days);
+
+        uint256 points1 = lpModule.getPoints(user1);
+        uint256 points2 = lpModule.getPoints(user2);
+
+        // Pool 1 has 2x multiplier compared to Pool 0
+        assertEq(points2, points1 * 2, "2x multiplier should give exactly 2x points");
     }
 
     // ============================================
     // Checkpoint Tests
     // ============================================
 
-    function test_checkpointAllPools() public {
-        vm.prank(keeper);
-        lpModule.checkpointAllPools();
-        // Should not revert
+    function test_checkpointSelf() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+
+        vm.prank(user1);
+        lpModule.checkpointSelf();
+
+        (, uint256 lastBalance,,,) = lpModule.getUserPoolState(user1, 0);
+        assertEq(lastBalance, lpAmount);
     }
 
-    function test_checkpointUsers() public {
-        lpToken1.mint(user1, 1000 * 1e18);
-        lpToken2.mint(user2, 500 * 1e18);
+    function test_checkpoint_anyoneCanCall() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+
+        // User2 can checkpoint user1
+        vm.prank(user2);
+        lpModule.checkpoint(user1);
+
+        (, uint256 lastBalance,,,) = lpModule.getUserPoolState(user1, 0);
+        assertEq(lastBalance, lpAmount);
+    }
+
+    function test_checkpointUsers_keeper() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+        _mintLpTokens(user2, lpAmount, 0);
+
+        _advanceBlocks(2);
 
         address[] memory users = new address[](2);
         users[0] = user1;
@@ -124,35 +275,26 @@ contract LPModuleTest is BaseTest {
         vm.prank(keeper);
         lpModule.checkpointUsers(users);
 
-        // Verify state
-        (uint256 balance, uint256 lastCheckpointBalance,, uint256 lastCheckpointTime,) =
-            lpModule.getUserPoolState(user1, 0);
+        _advanceTime(1 days);
 
-        assertEq(balance, 1000 * 1e18);
-        assertEq(lastCheckpointBalance, 1000 * 1e18);
-        assertGt(lastCheckpointTime, 0);
+        assertTrue(lpModule.getPoints(user1) > 0);
+        assertTrue(lpModule.getPoints(user2) > 0);
     }
 
-    function test_checkpointSelf() public {
-        lpToken1.mint(user1, 1000 * 1e18);
+    function test_checkpointUserPool_specific() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, lpAmount);
 
-        vm.prank(user1);
-        lpModule.checkpointSelf();
+        _advanceBlocks(2);
 
-        (, uint256 lastCheckpointBalance,,,) = lpModule.getUserPoolState(user1, 0);
-
-        assertEq(lastCheckpointBalance, 1000 * 1e18);
-    }
-
-    function test_checkpointUserPool() public {
-        lpToken1.mint(user1, 1000 * 1e18);
-
-        vm.prank(user2);
+        // Only checkpoint pool 0
         lpModule.checkpointUserPool(user1, 0);
 
-        (, uint256 lastCheckpointBalance,,,) = lpModule.getUserPoolState(user1, 0);
+        (, uint256 balance0,,,) = lpModule.getUserPoolState(user1, 0);
+        (, uint256 balance1,,,) = lpModule.getUserPoolState(user1, 1);
 
-        assertEq(lastCheckpointBalance, 1000 * 1e18);
+        assertEq(balance0, lpAmount);
+        assertEq(balance1, 0); // Pool 1 not checkpointed
     }
 
     function test_revert_checkpointUsers_batchTooLarge() public {
@@ -166,138 +308,136 @@ contract LPModuleTest is BaseTest {
         lpModule.checkpointUsers(users);
     }
 
-    // ============================================
-    // Points Calculation Tests
-    // ============================================
+    function test_revert_checkpointUsers_tooManyOperations() public {
+        // Add more pools to trigger operation limit (users * pools > 200)
+        for (uint256 i = 2; i < 15; i++) {
+            MockERC20 newLp = new MockERC20(string(abi.encodePacked("LP", i)), "LP", 18);
+            vm.prank(admin);
+            lpModule.addPool(address(newLp), 100, "Pool");
+        }
 
-    function test_getPoints_singlePool() public {
-        lpToken1.mint(user1, 1000 * 1e18);
+        // 15 pools * 15 users = 225 > 200
+        address[] memory users = new address[](15);
+        for (uint256 i = 0; i < 15; i++) {
+            users[i] = address(uint160(i + 1));
+        }
 
         vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
+        vm.expectRevert(abi.encodeWithSelector(LPModule.TooManyOperations.selector, 225, 200));
+        lpModule.checkpointUsers(users);
+    }
+
+    function test_checkpointUsers_skipsZeroAddress() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+
+        address[] memory users = new address[](3);
+        users[0] = user1;
+        users[1] = address(0); // Should be skipped
+        users[2] = user2;
+
+        vm.prank(keeper);
+        lpModule.checkpointUsers(users); // Should not revert
+
+        (, uint256 balance1,,,) = lpModule.getUserPoolState(user1, 0);
+        assertEq(balance1, lpAmount);
+    }
+
+    // ============================================
+    // Flash Loan Protection Tests
+    // ============================================
+
+    function test_flashLoanProtection() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        // First checkpoint - records balance
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        // Advance time to earn points
+        _advanceTime(1 days);
+
+        // Second checkpoint - should accrue points (passed flash loan protection)
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        uint256 pointsAfterFirstAccrual = lpModule.getPoints(user1);
+        assertTrue(pointsAfterFirstAccrual > 0, "Should have accrued points");
+
+        // Advance time but NOT blocks - simulating flash loan scenario
+        _advanceTime(1 days);
+
+        // Checkpoint without advancing blocks - flash loan protection triggered
+        lpModule.checkpoint(user1);
+
+        // The pending points in view function will show more,
+        // but accruedPoints won't increase because flash loan protection
+        uint256 pointsAfterFlashLoan = lpModule.getPoints(user1);
+        // Points may show pending amount but accruedPoints wasn't updated
+        assertTrue(pointsAfterFlashLoan > 0, "Pending points visible in view");
+    }
+
+    // ============================================
+    // Balance Change Tests
+    // ============================================
+
+    function test_balanceChange_afterCheckpoint() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        // Double the LP balance
+        lpToken1.mint(user1, lpAmount);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        // Points calculation should reflect the balance change
+        uint256 points = lpModule.getPoints(user1);
+
+        // Day 1: 1000 LP at rate
+        // Day 2: 2000 LP at rate
+        uint256 day1Points = lpAmount * LP_BASE_RATE * 1 days;
+        uint256 day2Points = (lpAmount * 2) * LP_BASE_RATE * 1 days;
+
+        assertEq(points, day1Points + day2Points);
+    }
+
+    function test_balanceDecrease_afterCheckpoint() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        // Remove half the LP balance
+        vm.prank(user1);
+        lpToken1.transfer(user2, lpAmount / 2);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
 
         _advanceTime(1 days);
 
         uint256 points = lpModule.getPoints(user1);
-        // Expected: balance * timeDelta * rate * multiplier / (supply * MULTIPLIER_BASE)
-        assertGt(points, 0);
-    }
 
-    function test_getPoints_multiplePoolsWithMultipliers() public {
-        lpToken1.mint(user1, 1000 * 1e18); // 1x multiplier
-        lpToken2.mint(user1, 1000 * 1e18); // 2x multiplier
+        // Day 1: 1000 LP
+        // Day 2: 500 LP
+        uint256 day1Points = lpAmount * LP_BASE_RATE * 1 days;
+        uint256 day2Points = (lpAmount / 2) * LP_BASE_RATE * 1 days;
 
-        vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
-
-        _advanceTime(1 days);
-
-        uint256 totalPoints = lpModule.getPoints(user1);
-
-        // Get individual pool points
-        (string[] memory names, uint256[] memory points,,) = lpModule.getUserPoolBreakdown(user1);
-
-        assertEq(names.length, 2);
-        assertGt(points[0], 0);
-        assertGt(points[1], 0);
-        // Pool 2 should have 2x points due to multiplier
-        assertApproxEqRel(points[1], points[0] * 2, 0.01e18);
-    }
-
-    function test_getPoints_inactivePool() public {
-        lpToken1.mint(user1, 1000 * 1e18);
-
-        vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
-
-        // Deactivate pool 0
-        vm.prank(admin);
-        lpModule.updatePool(0, 100, false);
-
-        _advanceTime(1 days);
-
-        // Points for inactive pool should be from before deactivation
-        (, uint256[] memory points,,) = lpModule.getUserPoolBreakdown(user1);
-
-        // Pool 0 is inactive, should have 0 new points after deactivation
-        // But might have points from before (depends on timing)
-    }
-
-    function test_estimatePoolPoints() public {
-        lpToken1.mint(user1, 1000 * 1e18);
-
-        uint256 estimated = lpModule.estimatePoolPoints(0, 500 * 1e18, 1 days);
-        assertGt(estimated, 0);
-    }
-
-    // ============================================
-    // View Functions Tests
-    // ============================================
-
-    function test_getPoolCount() public view {
-        assertEq(lpModule.getPoolCount(), 2);
-    }
-
-    function test_getPool() public view {
-        (
-            address lpToken,
-            uint256 multiplier,
-            bool poolActive,
-            string memory name,
-            uint256 totalSupply,
-            uint256 pointsPerLp
-        ) = lpModule.getPool(0);
-
-        assertEq(lpToken, address(lpToken1));
-        assertEq(multiplier, 100);
-        assertTrue(poolActive);
-        assertEq(name, "LP Pool 1");
-        assertEq(totalSupply, 0); // No LP minted yet
-        assertEq(pointsPerLp, 0);
-    }
-
-    function test_getUserPoolBreakdown() public {
-        lpToken1.mint(user1, 1000 * 1e18);
-        lpToken2.mint(user1, 500 * 1e18);
-
-        vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
-
-        _advanceTime(1 hours);
-
-        (string[] memory names, uint256[] memory points, uint256[] memory balances, uint256[] memory multipliers) =
-            lpModule.getUserPoolBreakdown(user1);
-
-        assertEq(names.length, 2);
-        assertEq(names[0], "LP Pool 1");
-        assertEq(names[1], "LP Pool 2");
-        assertEq(balances[0], 1000 * 1e18);
-        assertEq(balances[1], 500 * 1e18);
-        assertEq(multipliers[0], 100);
-        assertEq(multipliers[1], 200);
-    }
-
-    function test_getUserPoolState() public {
-        lpToken1.mint(user1, 1000 * 1e18);
-
-        vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
-
-        _advanceTime(1 hours);
-
-        (
-            uint256 balance,
-            uint256 lastCheckpointBalance,
-            uint256 earnedPoints,
-            uint256 lastCheckpointTime,
-            uint256 lastCheckpointBlock
-        ) = lpModule.getUserPoolState(user1, 0);
-
-        assertEq(balance, 1000 * 1e18);
-        assertEq(lastCheckpointBalance, 1000 * 1e18);
-        assertGt(earnedPoints, 0);
-        assertGt(lastCheckpointTime, 0);
-        assertGt(lastCheckpointBlock, 0);
+        assertEq(points, day1Points + day2Points);
     }
 
     // ============================================
@@ -305,7 +445,7 @@ contract LPModuleTest is BaseTest {
     // ============================================
 
     function test_setBaseRate() public {
-        uint256 newRate = 2 * LP_BASE_RATE;
+        uint256 newRate = LP_BASE_RATE * 2;
 
         vm.prank(admin);
         lpModule.setBaseRate(newRate);
@@ -316,99 +456,287 @@ contract LPModuleTest is BaseTest {
     function test_setActive() public {
         vm.prank(admin);
         lpModule.setActive(false);
-
         assertFalse(lpModule.isActive());
 
-        // Points should not accumulate when module is inactive
-        lpToken1.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
-        _advanceTime(1 days);
-
-        uint256 points = lpModule.getPoints(user1);
-        assertEq(points, 0);
+        vm.prank(admin);
+        lpModule.setActive(true);
+        assertTrue(lpModule.isActive());
     }
 
-    function test_pause_unpause() public {
+    function test_setMinHoldingBlocks() public {
+        vm.prank(admin);
+        lpModule.setMinHoldingBlocks(5);
+
+        assertEq(lpModule.minHoldingBlocks(), 5);
+    }
+
+    function test_pauseUnpause() public {
         vm.prank(admin);
         lpModule.pause();
+
+        // Operations that check whenNotPaused would fail
+        // (checkpoint functions don't have this modifier in the current implementation)
 
         vm.prank(admin);
         lpModule.unpause();
     }
 
-    // ============================================
-    // Edge Cases
-    // ============================================
+    function test_revert_adminFunctions_unauthorized() public {
+        vm.prank(user1);
+        vm.expectRevert();
+        lpModule.setBaseRate(1e16);
 
-    function test_zeroLpSupply() public {
-        // No LP minted, supply is 0
-        (,,,, uint256 totalSupply,) = lpModule.getPool(0);
+        vm.prank(user1);
+        vm.expectRevert();
+        lpModule.setActive(false);
 
-        assertEq(totalSupply, 0);
+        vm.prank(user1);
+        vm.expectRevert();
+        lpModule.addPool(address(0x123), 100, "Pool");
     }
 
-    function test_checkpointPools_specificPools() public {
-        uint256[] memory poolIds = new uint256[](1);
-        poolIds[0] = 0;
+    // ============================================
+    // View Functions Tests
+    // ============================================
 
-        vm.prank(keeper);
-        lpModule.checkpointPools(poolIds);
+    function test_getPool() public view {
+        (address lpToken, uint256 multiplier, bool poolActive, string memory name, uint256 totalSupply) =
+            lpModule.getPool(0);
+
+        assertEq(lpToken, address(lpToken1));
+        assertEq(multiplier, 100);
+        assertTrue(poolActive);
+        assertEq(name, "LP Pool 1");
+        assertEq(totalSupply, 0); // No tokens minted
     }
 
-    function test_checkpointPools_invalidPoolId() public {
-        uint256[] memory poolIds = new uint256[](1);
-        poolIds[0] = 999; // Invalid
+    function test_getUserPoolBreakdown() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, lpAmount * 2);
 
-        vm.prank(keeper);
-        lpModule.checkpointPools(poolIds);
-        // Should emit CheckpointPoolSkipped event but not revert
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        (string[] memory names, uint256[] memory points, uint256[] memory balances, uint256[] memory multipliers) =
+            lpModule.getUserPoolBreakdown(user1);
+
+        assertEq(names.length, 2);
+        assertEq(names[0], "LP Pool 1");
+        assertEq(names[1], "LP Pool 2");
+
+        assertEq(balances[0], lpAmount);
+        assertEq(balances[1], lpAmount * 2);
+
+        assertEq(multipliers[0], 100);
+        assertEq(multipliers[1], 200);
+
+        // Points should reflect multipliers
+        assertTrue(points[1] > points[0], "Pool 1 (2x) should have more points");
+    }
+
+    function test_getUserPoolState() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        (
+            uint256 balance,
+            uint256 lastCheckpointBalance,
+            uint256 earnedPoints,
+            uint256 lastAccrualTime,
+            uint256 lastCheckpointBlock
+        ) = lpModule.getUserPoolState(user1, 0);
+
+        assertEq(balance, lpAmount);
+        assertEq(lastCheckpointBalance, lpAmount);
+        assertTrue(earnedPoints > 0);
+        assertTrue(lastAccrualTime > 0);
+        assertTrue(lastCheckpointBlock > 0);
+    }
+
+    function test_estimatePoolPoints() public view {
+        uint256 lpAmount = 1000e18;
+        uint256 duration = 1 days;
+
+        uint256 estimated0 = lpModule.estimatePoolPoints(0, lpAmount, duration);
+        uint256 estimated1 = lpModule.estimatePoolPoints(1, lpAmount, duration);
+
+        // Pool 0: 1x multiplier
+        // Pool 1: 2x multiplier
+        uint256 expected0 = lpAmount * LP_BASE_RATE * duration;
+        uint256 expected1 = lpAmount * (LP_BASE_RATE * 2) * duration;
+
+        assertEq(estimated0, expected0);
+        assertEq(estimated1, expected1);
+    }
+
+    function test_estimatePoolPoints_invalidPool() public view {
+        uint256 estimated = lpModule.estimatePoolPoints(99, 1000e18, 1 days);
+        assertEq(estimated, 0);
+    }
+
+    function test_estimatePoolPoints_inactivePool() public {
+        vm.prank(admin);
+        lpModule.updatePool(0, 100, false);
+
+        uint256 estimated = lpModule.estimatePoolPoints(0, 1000e18, 1 days);
+        assertEq(estimated, 0);
+    }
+
+    // ============================================
+    // Integration with PointsHub Tests
+    // ============================================
+
+    function test_pointsHub_integration() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        // PointsHub should aggregate points from LPModule
+        uint256 lpPoints = lpModule.getPoints(user1);
+        uint256 totalPoints = pointsHub.getTotalPoints(user1);
+
+        // Total should include LP points (and possibly others)
+        assertTrue(totalPoints >= lpPoints);
+    }
+
+    // ============================================
+    // Edge Cases Tests
+    // ============================================
+
+    function test_zeroBalance_noPoints() public {
+        // User has no LP tokens
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        uint256 points = lpModule.getPoints(user1);
+        assertEq(points, 0, "Zero balance should earn zero points");
+    }
+
+    function test_moduleInactive_noNewPoints() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        // Checkpoint to persist the earned points before deactivating
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        uint256 pointsBefore = lpModule.getPoints(user1);
+        assertTrue(pointsBefore > 0, "Should have earned points");
+
+        // Deactivate module
+        vm.prank(admin);
+        lpModule.setActive(false);
+
+        _advanceTime(1 days);
+
+        uint256 pointsAfter = lpModule.getPoints(user1);
+        assertEq(pointsAfter, pointsBefore, "No new points when module inactive");
+    }
+
+    function test_poolInactive_noNewPoints() public {
+        uint256 lpAmount = 1000e18;
+        _mintLpTokens(user1, lpAmount, 0);
+
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(1 days);
+
+        // Checkpoint to persist the earned points before deactivating
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        uint256 pointsBefore = lpModule.getPoints(user1);
+        assertTrue(pointsBefore > 0, "Should have earned points");
+
+        // Deactivate pool 0
+        vm.prank(admin);
+        lpModule.updatePool(0, 100, false);
+
+        _advanceTime(1 days);
+
+        uint256 pointsAfter = lpModule.getPoints(user1);
+        assertEq(pointsAfter, pointsBefore, "No new points when pool inactive");
     }
 
     // ============================================
     // Fuzz Tests
     // ============================================
 
-    function testFuzz_pointsCalculation(uint256 balance, uint256 timeElapsed) public {
-        balance = bound(balance, 1e18, 1_000_000 * 1e18);
-        timeElapsed = bound(timeElapsed, 1 hours, 365 days);
+    function testFuzz_earnPoints(uint256 lpAmount, uint256 duration) public {
+        lpAmount = bound(lpAmount, 1e18, 1e24);
+        duration = bound(duration, 1 hours, 365 days);
 
-        lpToken1.mint(user1, balance);
-        vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
+        lpToken1.mint(user1, lpAmount);
 
-        _advanceTime(timeElapsed);
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
+
+        _advanceTime(duration);
 
         uint256 points = lpModule.getPoints(user1);
-        assertGt(points, 0);
+
+        uint256 expected = lpAmount * LP_BASE_RATE * duration;
+        assertEq(points, expected);
     }
 
-    function testFuzz_multiplierEffect(uint256 multiplier) public {
-        multiplier = bound(multiplier, 1, 1000);
+    function testFuzz_multiplePools(uint256 amount1, uint256 amount2) public {
+        amount1 = bound(amount1, 1e18, 1e24);
+        amount2 = bound(amount2, 1e18, 1e24);
 
-        // Update pool multiplier
-        vm.prank(admin);
-        lpModule.updatePool(0, multiplier, true);
+        lpToken1.mint(user1, amount1);
+        lpToken2.mint(user1, amount2);
 
-        lpToken1.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        lpModule.checkpointUsers(toArray(user1));
+        _advanceBlocks(2);
+        lpModule.checkpoint(user1);
 
         _advanceTime(1 days);
 
         uint256 points = lpModule.getPoints(user1);
-        assertGt(points, 0);
+
+        uint256 expected1 = amount1 * LP_BASE_RATE * 1 days;
+        uint256 expected2 = amount2 * (LP_BASE_RATE * 2) * 1 days; // 2x multiplier
+
+        assertEq(points, expected1 + expected2);
     }
 
     // ============================================
-    // Helper Functions
+    // UUPS Upgrade Authorization Tests
     // ============================================
 
-    function toArray(address a) internal pure returns (address[] memory) {
-        address[] memory arr = new address[](1);
-        arr[0] = a;
-        return arr;
+    function test_upgrade_unauthorized_reverts() public {
+        LPModule newImpl = new LPModule();
+
+        vm.prank(admin);
+        vm.expectRevert();
+        lpModule.upgradeToAndCall(address(newImpl), "");
+
+        vm.prank(user1);
+        vm.expectRevert();
+        lpModule.upgradeToAndCall(address(newImpl), "");
+    }
+
+    function test_upgrade_authorized_succeeds() public {
+        LPModule newImpl = new LPModule();
+
+        vm.prank(upgrader);
+        lpModule.upgradeToAndCall(address(newImpl), "");
     }
 }
-
-import {MockERC20} from "./mocks/MockERC20.sol";

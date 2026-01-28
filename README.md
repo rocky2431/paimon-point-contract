@@ -1,13 +1,14 @@
-# Paimon Points System v1.3.0
+# Paimon Points System v2.0.0
 
-链上模块化积分系统，支持多种积分获取方式和统一兑换机制。
+链上模块化积分系统，采用**信用卡积分模式**，支持多种积分获取方式和统一兑换机制。
+
+> **v2.0.0 重大变更**: 从 Synthetix 风格的"瓜分池子"模式迁移到"信用卡积分"模式，确保后入者与早入者在同等条件下获得同等积分，无稀释效应。
 
 ## 目录
 
 - [架构概述](#架构概述)
 - [合约清单](#合约清单)
 - [PointsHub (中央聚合器)](#pointshub-中央聚合器)
-- [HoldingModule (持有模块)](#holdingmodule-持有模块)
 - [StakingModule (质押模块)](#stakingmodule-质押模块)
 - [LPModule (LP模块)](#lpmodule-lp模块)
 - [ActivityModule (活动模块)](#activitymodule-活动模块)
@@ -26,7 +27,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         PointsHub v1.3.0                            │
+│                         PointsHub v2.0.0                            │
 │                    (中央聚合器 + 兑换引擎)                            │
 │                                                                     │
 │  公式: claimablePoints = Σ modules.getPoints(user)                  │
@@ -39,39 +40,48 @@
       │   (IPointsModule 接口)    │       │ (IPenaltyModule)    │
       └───────────┬───────────────┘       └─────────────────────┘
                   │
-    ┌─────────────┼─────────────┬─────────────────┐
-    │             │             │                 │
-    ▼             ▼             ▼                 ▼
-┌─────────┐ ┌─────────────┐ ┌─────────┐ ┌─────────────────┐
-│Holding  │ │  Staking    │ │   LP    │ │    Activity     │
-│Module   │ │  Module     │ │ Module  │ │     Module      │
-│         │ │             │ │         │ │                 │
-│ 持有PPT │ │ 锁定质押PPT │ │ 质押LP  │ │  Merkle proof   │
-│ 即得积分│ │ 获得Boost  │ │ 多池支持│ │   链下活动      │
-└─────────┘ └─────────────┘ └─────────┘ └─────────────────┘
+    ┌─────────────┼─────────────────────────┐
+    │             │                         │
+    ▼             ▼                         ▼
+┌─────────────┐ ┌─────────┐ ┌─────────────────┐
+│  Staking    │ │   LP    │ │    Activity     │
+│  Module     │ │ Module  │ │     Module      │
+│             │ │         │ │                 │
+│ 灵活/锁定   │ │ 质押LP  │ │  Merkle proof   │
+│ 质押PPT    │ │ 多池支持│ │   链下活动      │
+│ Boost加成  │ │         │ │                 │
+└─────────────┘ └─────────┘ └─────────────────┘
 ```
 
-### 积分算法
+### 信用卡积分模式 (Credit Card Mode)
 
-所有链上积分模块使用 **Synthetix-style** 累积算法：
+v2.0.0 采用**信用卡积分模式**，与传统 Synthetix-style 的"瓜分池子"模式不同：
 
+| 特性 | 旧模式 (Synthetix) | 新模式 (Credit Card) |
+|------|-------------------|---------------------|
+| 全局状态 | `pointsPerShareStored`, `totalBoostedStaked` | **无全局状态** |
+| 积分计算 | `balance × (currentPointsPerShare - userPaid)` | `amount × rate × duration` |
+| 稀释效应 | 后入者会稀释早入者 | **无稀释** |
+| 公平性 | 早入者优势 | **同等条件同等积分** |
+| 复杂度 | 较高 (全局追踪) | 较低 (独立计算) |
+
+**核心公式:**
 ```
-pointsPerShare += (timeDelta × pointsRatePerSecond × PRECISION) / totalSupply
-userPoints = userBoostedAmount × (currentPointsPerShare - userPointsPerSharePaid) / PRECISION
+StakingModule: points = amount × boost × pointsRatePerSecond × duration / BOOST_BASE
+LPModule:      points = balance × (baseRate × multiplier / MULTIPLIER_BASE) × duration
 ```
 
 ---
 
 ## 合约清单
 
-| 合约 | 文件 | 版本 | 大小 | 描述 |
-|------|------|------|------|------|
-| PointsHub | `src/PointsHub.sol` | 1.3.0 | 22.9 KB | 中央聚合器，积分兑换 |
-| HoldingModule | `src/HoldingModule.sol` | 1.3.0 | 18.0 KB | PPT 持有积分 |
-| StakingModule | `src/StakingModule.sol` | 1.3.0 | 32.2 KB | PPT 锁定质押 (带 Boost) |
-| LPModule | `src/LPModule.sol` | 1.3.0 | 24.8 KB | LP Token 多池质押 |
-| ActivityModule | `src/ActivityModule.sol` | 1.3.0 | 18.6 KB | 链下活动积分 (Merkle) |
-| PenaltyModule | `src/PenaltyModule.sol` | 1.3.0 | 17.1 KB | 惩罚扣除 (Merkle) |
+| 合约 | 文件 | 版本 | 描述 |
+|------|------|------|------|
+| PointsHub | `src/PointsHub.sol` | 1.3.0 | 中央聚合器，积分兑换 |
+| StakingModule | `src/StakingModule.sol` | 2.0.0 | PPT 灵活/锁定质押 (信用卡模式) |
+| LPModule | `src/LPModule.sol` | 2.0.0 | LP Token 多池质押 (信用卡模式) |
+| ActivityModule | `src/ActivityModule.sol` | 1.3.0 | 链下活动积分 (Merkle) |
+| PenaltyModule | `src/PenaltyModule.sol` | 1.3.0 | 惩罚扣除 (Merkle) |
 
 ---
 
@@ -207,91 +217,18 @@ error ZeroTokenAmount();
 
 ---
 
-## HoldingModule (持有模块)
-
-### 功能概述
-
-简单持有 PPT 即可获得积分，无需锁定。
-
-### 常量
-
-| 常量 | 值 | 描述 |
-|------|-----|------|
-| `PRECISION` | `1e18` | 计算精度 |
-| `MODULE_NAME` | `"PPT Holding"` | 模块名称 |
-| `MAX_BATCH_USERS` | `100` | 批量 checkpoint 最大用户数 |
-
-### 状态变量
-
-| 变量 | 类型 | 描述 |
-|------|------|------|
-| `ppt` | `IPPT` | PPT Vault 合约 |
-| `pointsRatePerSecond` | `uint256` | 每秒每 PPT 积分率 |
-| `lastUpdateTime` | `uint256` | 上次全局更新时间 |
-| `pointsPerShareStored` | `uint256` | 累积每份积分 |
-| `userPointsPerSharePaid` | `mapping(address => uint256)` | 用户上次记录的每份积分 |
-| `userPointsEarned` | `mapping(address => uint256)` | 用户累积积分 |
-| `userLastBalance` | `mapping(address => uint256)` | 用户上次记录余额 |
-| `userLastCheckpoint` | `mapping(address => uint256)` | 用户上次 checkpoint 时间 |
-| `userLastCheckpointBlock` | `mapping(address => uint256)` | 用户上次 checkpoint 区块 |
-| `active` | `bool` | 模块激活状态 |
-| `minBalanceThreshold` | `uint256` | 最小余额阈值 |
-| `minHoldingBlocks` | `uint256` | Flash loan 防护区块数 |
-| `useEffectiveSupply` | `bool` | 是否使用 effectiveSupply |
-
-### 核心函数
-
-```solidity
-// IPointsModule 实现
-function getPoints(address user) external view returns (uint256)
-function moduleName() external pure returns (string memory)
-function isActive() external view returns (bool)
-
-// Checkpoint
-function checkpointGlobal() external onlyRole(KEEPER_ROLE)
-function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE)
-function checkpoint(address user) external
-function checkpointSelf() external
-
-// 查询
-function currentPointsPerShare() external view returns (uint256)
-function getUserState(address user) external view returns (
-    uint256 balance,
-    uint256 lastCheckpointBalance,
-    uint256 earnedPoints,
-    uint256 lastCheckpointTime
-)
-function estimatePoints(uint256 balance, uint256 durationSeconds) external view returns (uint256)
-
-// 管理
-function setPointsRate(uint256 newRate) external onlyRole(ADMIN_ROLE)
-function setMinBalanceThreshold(uint256 threshold) external onlyRole(ADMIN_ROLE)
-function setActive(bool _active) external onlyRole(ADMIN_ROLE)
-function setPpt(address _ppt) external onlyRole(ADMIN_ROLE)
-function setSupplyMode(bool _useEffectiveSupply) external onlyRole(ADMIN_ROLE)
-function setMinHoldingBlocks(uint256 blocks) external onlyRole(ADMIN_ROLE)
-function pause() external onlyRole(ADMIN_ROLE)
-function unpause() external onlyRole(ADMIN_ROLE)
-```
-
-### 积分计算公式
-
-```
-// 全局状态更新
-pointsPerShareStored += (timeDelta × pointsRatePerSecond × PRECISION) / effectiveSupply
-
-// 用户积分计算
-pendingPoints = userLastBalance × (currentPointsPerShare - userPointsPerSharePaid) / PRECISION
-totalPoints = userPointsEarned + pendingPoints
-```
-
----
-
 ## StakingModule (质押模块)
 
 ### 功能概述
 
-锁定质押 PPT 获得 Boost 加成积分，替代 HoldingModule。
+PPT 质押积分模块，支持**灵活质押**和**锁定质押**两种模式，采用信用卡积分模式计算。
+
+### 质押类型
+
+| 类型 | Boost | 描述 |
+|------|-------|------|
+| **灵活质押** (Flexible) | 1.0x | 随时取出，无锁定期 |
+| **锁定质押** (Locked) | 1.02x~2.0x | 锁定期内有 boost 加成，到期后自动降为 1.0x |
 
 ### 常量
 
@@ -303,7 +240,7 @@ totalPoints = userPointsEarned + pendingPoints
 | `MIN_LOCK_DURATION` | `7 days` | 最小锁定期 |
 | `MAX_LOCK_DURATION` | `365 days` | 最大锁定期 |
 | `EARLY_UNLOCK_PENALTY_BPS` | `5000` | 提前解锁惩罚 (50%) |
-| `MAX_STAKES_PER_USER` | `10` | 每用户最大质押数 |
+| `MAX_STAKES_PER_USER` | `100` | 每用户最大质押数 |
 | `MAX_BATCH_USERS` | `100` | 批量 checkpoint 最大用户数 |
 | `MAX_STAKE_AMOUNT` | `type(uint128).max / 2` | 单笔最大质押量 |
 | `MIN_POINTS_RATE` | `1` | 最小积分率 |
@@ -313,73 +250,68 @@ totalPoints = userPointsEarned + pendingPoints
 
 | 锁定时长 | Boost 倍数 | 计算公式 |
 |----------|-----------|----------|
+| 灵活质押 | 1.0x | `BOOST_BASE (10000)` |
 | 7 天 (最小) | 1.019x | `10000 + (7 × 10000 / 365) = 10191` |
 | 30 天 | 1.082x | `10000 + (30 × 10000 / 365) = 10822` |
 | 90 天 | 1.247x | `10000 + (90 × 10000 / 365) = 12466` |
 | 180 天 | 1.493x | `10000 + (180 × 10000 / 365) = 14932` |
 | 365 天 (最大) | 2.0x | `10000 + (365 × 10000 / 365) = 20000` |
 
+**锁定到期行为**: 锁定到期后 boost 自动降为 1.0x，用户无需手动操作。
+
 ### 数据结构
 
 ```solidity
-/// @notice 单个质押记录 (2 storage slots)
-struct StakeInfo {
-    uint128 amount;              // 质押数量
-    uint128 boostedAmount;       // amount × boost / BOOST_BASE
-    uint128 pointsEarnedAtStake; // 质押时累积积分 (用于惩罚计算)
-    uint64 lockEndTime;          // 解锁时间
-    uint56 lockDuration;         // 锁定期 (秒)
-    bool isActive;               // 是否活跃
+/// @notice 质押类型
+enum StakeType {
+    Flexible, // 灵活质押，随时取出，1.0x boost
+    Locked    // 锁定质押，有 boost 加成
 }
 
-/// @notice 用户聚合状态 (O(1) 查询)
+/// @notice 单个质押记录 (信用卡积分模式)
+struct StakeInfo {
+    uint256 amount;           // 质押金额
+    uint256 accruedPoints;    // 已累计积分（截至 lastAccrualTime）
+    uint64 startTime;         // 质押开始时间
+    uint64 lockEndTime;       // 锁定到期时间 (Flexible=0)
+    uint64 lastAccrualTime;   // 上次积分累计时间
+    uint32 lockDurationDays;  // 原始锁定天数 (0 for Flexible)
+    StakeType stakeType;      // 质押类型
+    bool isActive;            // 质押是否活跃
+}
+
+/// @notice 聚合用户状态
 struct UserState {
-    uint256 totalBoostedAmount;  // 所有活跃质押的 boostedAmount 之和
-    uint256 pointsPerSharePaid;  // 上次 checkpoint 的全局 PPS
-    uint256 pointsEarned;        // 累积积分 (已扣除惩罚)
-    uint256 lastCheckpointBlock; // Flash loan 防护
+    uint256 totalStakedAmount;   // 所有活跃质押的原始金额总和
+    uint256 lastCheckpointBlock; // 用于闪电贷保护
 }
 ```
 
-### 状态变量
+### 积分计算公式 (信用卡模式)
 
-| 变量 | 类型 | 描述 |
-|------|------|------|
-| `ppt` | `IERC20` | PPT Token |
-| `pointsRatePerSecond` | `uint256` | 每秒每 boosted PPT 积分率 |
-| `lastUpdateTime` | `uint256` | 上次全局更新时间 |
-| `pointsPerShareStored` | `uint256` | 累积每 boosted 份积分 |
-| `totalBoostedStaked` | `uint256` | 全局 boosted 质押量 |
-| `userStates` | `mapping(address => UserState)` | 用户状态 |
-| `userStakes` | `mapping(address => mapping(uint256 => StakeInfo))` | 用户质押记录 |
-| `userStakeCount` | `mapping(address => uint256)` | 用户质押数量 |
-| `active` | `bool` | 模块激活状态 |
-| `minHoldingBlocks` | `uint256` | Flash loan 防护区块数 |
+```
+// 每个质押独立计算，无全局状态
+points = amount × boost × pointsRatePerSecond × duration / BOOST_BASE
+
+// boost 根据质押类型和锁定状态动态计算
+effectiveBoost = isLocked && notExpired ? calculateBoost(lockDuration) : BOOST_BASE
+```
 
 ### 核心函数
 
 #### 质押/解锁
 
 ```solidity
-// 质押 PPT (锁定 7-365 天)
-function stake(uint256 amount, uint256 lockDuration)
+// 灵活质押 (1.0x boost，随时取出)
+function stakeFlexible(uint256 amount)
     external nonReentrant whenNotPaused returns (uint256 stakeIndex)
 
-// 解锁质押 (提前解锁有惩罚)
+// 锁定质押 (锁定 7-365 天，有 boost 加成)
+function stakeLocked(uint256 amount, uint256 lockDurationDays)
+    external nonReentrant whenNotPaused returns (uint256 stakeIndex)
+
+// 解锁质押 (锁定质押提前解锁有惩罚)
 function unstake(uint256 stakeIndex) external nonReentrant whenNotPaused
-```
-
-#### Boost 计算
-
-```solidity
-// 计算 Boost 倍数 (宽松版 - 超出范围自动截断)
-function calculateBoost(uint256 lockDuration) public pure returns (uint256 boost)
-
-// 计算 Boost 倍数 (严格版 - 超出范围 revert)
-function calculateBoostStrict(uint256 lockDuration) public pure returns (uint256 boost)
-
-// 计算 Boosted 数量
-function calculateBoostedAmount(uint256 amount, uint256 lockDuration) public pure returns (uint256)
 ```
 
 #### 查询函数
@@ -391,35 +323,41 @@ function moduleName() external pure returns (string memory)
 function isActive() external view returns (bool)
 
 // 状态查询
-function currentPointsPerShare() external view returns (uint256)
 function getUserState(address user) external view returns (
-    uint256 totalBoostedAmount,
+    uint256 totalStaked,
     uint256 earnedPoints,
     uint256 activeStakeCount
 )
 function getStakeInfo(address user, uint256 stakeIndex) external view returns (StakeInfo memory)
+function getStakePointsAndBoost(address user, uint256 stakeIndex) external view returns (
+    uint256 totalPoints,
+    uint256 effectiveBoost,
+    bool isLockExpired
+)
 function getAllStakes(address user) external view returns (StakeInfo[] memory)
 
 // 估算
-function estimatePoints(uint256 amount, uint256 lockDuration, uint256 holdDuration) external view returns (uint256)
+function estimatePoints(uint256 amount, uint256 lockDurationDays, uint256 holdDurationSeconds) external view returns (uint256)
 function calculatePotentialPenalty(address user, uint256 stakeIndex) external view returns (uint256 penalty)
 ```
 
 #### Checkpoint
 
 ```solidity
-function checkpointGlobal() external onlyRole(KEEPER_ROLE)
+// Keeper 批量检查点
 function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE)
-function checkpoint(address user) external returns (bool pointsCredited)
-function checkpointSelf() external returns (bool pointsCredited)
+
+// 任何人可调用
+function checkpoint(address user) external
+function checkpointSelf() external
 ```
 
 ### 提前解锁惩罚公式
 
 ```
-earnedSinceStake = currentPoints - pointsEarnedAtStake
+currentPoints = 当前累计积分
 remainingTime = lockEndTime - block.timestamp
-penalty = earnedSinceStake × (remainingTime / lockDuration) × 50%
+penalty = currentPoints × (remainingTime / lockDuration) × 50%
 ```
 
 **示例:**
@@ -430,15 +368,13 @@ penalty = earnedSinceStake × (remainingTime / lockDuration) × 50%
 ### 事件
 
 ```solidity
-event Staked(address indexed user, uint256 indexed stakeIndex, uint256 amount, uint256 lockDuration, uint256 boostedAmount, uint256 lockEndTime);
-event Unstaked(address indexed user, uint256 indexed stakeIndex, uint256 amount, uint256 actualPenalty, uint256 theoreticalPenalty, bool isEarlyUnlock, bool penaltyWasCapped);
-event GlobalCheckpointed(uint256 pointsPerShare, uint256 timestamp, uint256 totalBoostedStaked);
-event UserCheckpointed(address indexed user, uint256 pointsEarned, uint256 totalBoostedAmount, uint256 timestamp, bool pointsCredited);
+event Staked(address indexed user, uint256 indexed stakeIndex, uint256 amount, StakeType stakeType, uint256 lockDurationDays, uint256 boost, uint256 lockEndTime);
+event Unstaked(address indexed user, uint256 indexed stakeIndex, uint256 amount, uint256 actualPenalty, uint256 cappedPenalty, bool isEarlyUnlock, bool penaltyWasCapped);
+event UserCheckpointed(address indexed user, uint256 pointsEarned, uint256 totalStakedAmount, uint256 timestamp);
 event FlashLoanProtectionTriggered(address indexed user, uint256 blocksRemaining);
 event ZeroAddressSkipped(uint256 indexed position);
 event PointsRateUpdated(uint256 oldRate, uint256 newRate);
 event ModuleActiveStatusUpdated(bool active);
-event StakingModuleUpgraded(address indexed newImplementation, uint256 timestamp);
 event MinHoldingBlocksUpdated(uint256 oldBlocks, uint256 newBlocks);
 event PptUpdated(address indexed oldPpt, address indexed newPpt);
 ```
@@ -457,8 +393,6 @@ error AmountTooLarge(uint256 amount, uint256 max);
 error InvalidPointsRate(uint256 rate, uint256 min, uint256 max);
 error NotAContract(address addr);
 error InvalidERC20(address addr);
-error PointsOverflow(uint256 points);
-error InvalidHoldDuration(uint256 holdDuration, uint256 lockDuration);
 ```
 
 ---
@@ -569,13 +503,18 @@ function checkpointSelf() external
 function checkpointUserPool(address user, uint256 poolId) external
 ```
 
-### 积分计算
+### 积分计算 (信用卡模式)
 
 ```
+// 每个用户独立计算，无全局状态
 effectiveRate = basePointsRatePerSecond × multiplier / MULTIPLIER_BASE
-pointsPerLpStored += (timeDelta × effectiveRate × PRECISION) / totalLpSupply
-userPoints = userLastBalance × (currentPointsPerLp - userPointsPerLpPaid) / PRECISION
+userPoints = userBalance × effectiveRate × duration
 ```
+
+**特点:**
+- 无全局 `pointsPerLpStored` 状态
+- 用户积分只与自身余额和时间相关
+- 后入者不会稀释早入者的积分
 
 ---
 
@@ -803,7 +742,6 @@ interface IPPT {
    - initialize(admin, upgrader)
 
 3. 部署 Points Modules
-   - HoldingModule.initialize(ppt, admin, keeper, upgrader, pointsRatePerSecond)
    - StakingModule.initialize(ppt, admin, keeper, upgrader, pointsRatePerSecond)
    - LPModule.initialize(admin, keeper, upgrader, baseRate)
    - ActivityModule.initialize(admin, keeper, upgrader)
@@ -812,7 +750,7 @@ interface IPPT {
    - initialize(admin, keeper, upgrader, penaltyRateBps)
 
 5. 配置 PointsHub
-   - registerModule(holdingModule 或 stakingModule)
+   - registerModule(stakingModule)
    - registerModule(lpModule)
    - registerModule(activityModule)
    - setPenaltyModule(penaltyModule)
@@ -930,10 +868,9 @@ PointsHub 调用模块时使用 gas limit 防止恶意模块 DoS：
 |------|-----|------|
 | `PointsHub.getTotalPoints()` | ~20,000 - 50,000 | 取决于模块数量 |
 | `PointsHub.redeem()` | ~80,000 | 含 ERC20 转账 |
-| `HoldingModule.getPoints()` | ~5,000 | O(1) |
-| `HoldingModule.checkpoint()` | ~30,000 | 单用户 |
-| `StakingModule.getPoints()` | ~5,000 | O(1) |
-| `StakingModule.stake()` | ~80,000 | 含 ERC20 转账 |
+| `StakingModule.getPoints()` | ~5,000 - 20,000 | 取决于用户质押数量 |
+| `StakingModule.stakeFlexible()` | ~80,000 | 含 ERC20 转账 |
+| `StakingModule.stakeLocked()` | ~85,000 | 含 ERC20 转账 |
 | `StakingModule.unstake()` | ~60,000 | 含 ERC20 转账 |
 | `LPModule.getPoints()` | ~10,000 - 40,000 | 取决于池数量 |
 | `ActivityModule.claim()` | ~50,000 | 含 Merkle 验证 |
@@ -970,14 +907,14 @@ forge coverage
 
 | 文件 | 测试数 | 描述 |
 |------|--------|------|
-| `test/StakingModule.t.sol` | 88 | 质押模块全面测试 |
-| `test/HoldingModule.t.sol` | - | 持有模块测试 |
-| `test/LPModule.t.sol` | - | LP 模块测试 |
-| `test/ActivityModule.t.sol` | - | 活动模块测试 |
-| `test/PenaltyModule.t.sol` | - | 惩罚模块测试 |
-| `test/PointsHub.t.sol` | - | 聚合器测试 |
-| `test/Integration.t.sol` | - | 集成测试 |
-| `test/Security.t.sol` | - | 安全测试 |
+| `test/StakingModule.t.sol` | 67 | 质押模块全面测试 (信用卡模式) |
+| `test/LPModule.t.sol` | 44 | LP 模块测试 (信用卡模式) |
+| `test/ActivityModule.t.sol` | 24 | 活动模块测试 |
+| `test/PenaltyModule.t.sol` | 23 | 惩罚模块测试 |
+| `test/PointsHub.t.sol` | 22 | 聚合器测试 |
+| `test/Integration.t.sol` | 12 | 集成测试 |
+| `test/Security.t.sol` | 23 | 安全测试 |
+| **Total** | **215** | |
 
 ---
 

@@ -10,10 +10,12 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {IPointsModule} from "./interfaces/IPointsModule.sol";
 
-/// @title LPModule
+/// @title LPModule v2.0 - 信用卡积分模式
 /// @author Paimon Protocol
 /// @notice LP 提供奖励的积分模块
-/// @dev 支持多个具有不同倍数的 LP 池
+/// @dev 使用"信用卡积分"模式：积分 = lpBalance × multiplier × baseRate × duration / MULTIPLIER_BASE
+///      每个用户的积分只与自己的 LP 持有相关，后入者不会被稀释
+///      支持多个具有不同倍数的 LP 池
 contract LPModule is
     IPointsModule,
     Initializable,
@@ -23,7 +25,7 @@ contract LPModule is
     UUPSUpgradeable
 {
     // =============================================================================
-    // 常量和角色
+    // Constants & Roles
     // =============================================================================
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -32,80 +34,72 @@ contract LPModule is
 
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MULTIPLIER_BASE = 100; // 100 = 1x, 200 = 2x
-    uint256 public constant MAX_MULTIPLIER = 1000; // 10x 最大倍数
+    uint256 public constant MAX_MULTIPLIER = 1000; // 10x max multiplier
     string public constant MODULE_NAME = "LP Providing";
-    string public constant VERSION = "1.3.0";
+    string public constant VERSION = "2.0.0";
 
-    /// @notice 用户检查点的最大批处理大小
+    /// @notice Max batch size for user checkpoints
     uint256 public constant MAX_BATCH_USERS = 25;
 
-    /// @notice 每批次的最大总操作数（用户数 * 池数）
+    /// @notice Max total operations per batch (users * pools)
     uint256 public constant MAX_OPERATIONS_PER_BATCH = 200;
 
-    // =============================================================================
-    // 数据结构
-    // =============================================================================
-
-    /// @notice 池配置
-    struct PoolConfig {
-        address lpToken; // LP Token 地址
-        uint256 multiplier; // 积分倍数 (100 = 1x, 200 = 2x)
-        bool isActive; // 池是否激活
-        string name; // 池的显示名称
-    }
-
-    /// @notice 用于积分计算的池状态
-    struct PoolState {
-        uint256 lastUpdateTime; // 最后更新时间戳
-        uint256 pointsPerLpStored; // 每个 LP token 的累积积分
-    }
-
-    /// @notice 每个池的用户状态
-    struct UserPoolState {
-        uint256 pointsPerLpPaid; // 用户最后记录的每 LP 积分
-        uint256 pointsEarned; // 用户累积的积分
-        uint256 lastBalance; // 用户最后记录的 LP 余额
-        uint256 lastCheckpoint; // 最后检查点时间戳
-        uint256 lastCheckpointBlock; // 最后检查点区块号（用于闪电贷保护）
-    }
-
-    // =============================================================================
-    // 状态变量
-    // =============================================================================
-
-    /// @notice 每个 LP token 每秒的基础积分率
-    uint256 public basePointsRatePerSecond;
-
-    /// @notice 池配置数组
-    PoolConfig[] public pools;
-
-    /// @notice 映射: lpToken => poolId + 1 (0 表示不存在)
-    mapping(address => uint256) public poolIndex;
-
-    /// @notice 映射: poolId => PoolState
-    mapping(uint256 => PoolState) public poolStates;
-
-    /// @notice 映射: user => poolId => UserPoolState
-    mapping(address => mapping(uint256 => UserPoolState)) public userPoolStates;
-
-    /// @notice 模块是否激活
-    bool public active;
-
-    /// @notice 余额必须持有的最小区块数才能计入积分（闪电贷保护）
-    uint256 public minHoldingBlocks;
-
-    /// @notice 允许的最大池数量
+    /// @notice Max number of pools allowed
     uint256 public constant MAX_POOLS = 20;
 
     // =============================================================================
-    // 事件
+    // Data Structures
+    // =============================================================================
+
+    /// @notice Pool configuration
+    struct PoolConfig {
+        address lpToken; // LP Token address
+        uint256 multiplier; // Points multiplier (100 = 1x, 200 = 2x)
+        bool isActive; // Whether pool is active
+        string name; // Pool display name
+    }
+
+    /// @notice User state per pool (v2 - Credit Card Mode)
+    /// @dev 不再需要 pointsPerLpPaid，改用时间累计模式
+    struct UserPoolState {
+        uint256 accruedPoints; // 已累计的积分
+        uint256 lastBalance; // 上次检查点时的 LP 余额
+        uint256 lastAccrualTime; // 上次积分累计时间
+        uint256 lastCheckpointBlock; // 用于闪电贷保护
+    }
+
+    // =============================================================================
+    // State Variables
+    // =============================================================================
+
+    /// @notice Base points rate per LP token per second
+    uint256 public basePointsRatePerSecond;
+
+    /// @notice Pool configuration array
+    PoolConfig[] public pools;
+
+    /// @notice Mapping: lpToken => poolId + 1 (0 means not found)
+    mapping(address => uint256) public poolIndex;
+
+    /// @notice Mapping: user => poolId => UserPoolState
+    mapping(address => mapping(uint256 => UserPoolState)) public userPoolStates;
+
+    /// @notice Whether module is active
+    bool public active;
+
+    /// @notice Minimum blocks balance must be held for points to count (flash loan protection)
+    uint256 public minHoldingBlocks;
+
+    // =============================================================================
+    // Events
     // =============================================================================
 
     event PoolAdded(uint256 indexed poolId, address indexed lpToken, uint256 multiplier, string name);
     event PoolUpdated(uint256 indexed poolId, uint256 multiplier, bool isActive);
     event PoolRemoved(uint256 indexed poolId, address indexed lpToken);
-    event GlobalPoolCheckpointed(uint256 indexed poolId, uint256 pointsPerLp, uint256 timestamp);
-    event UserPoolCheckpointed(address indexed user, uint256 indexed poolId, uint256 pointsEarned, uint256 balance);
+    event UserPoolCheckpointed(
+        address indexed user, uint256 indexed poolId, uint256 accruedPoints, uint256 balance, uint256 timestamp
+    );
     event BaseRateUpdated(uint256 oldRate, uint256 newRate);
     event ModuleActiveStatusUpdated(bool active);
     event LPModuleUpgraded(address indexed newImplementation, uint256 timestamp);
@@ -113,23 +107,23 @@ contract LPModule is
     event PoolNameUpdated(uint256 indexed poolId, string oldName, string newName);
     event LPTokenQueryFailed(uint256 indexed poolId, address indexed lpToken);
     event MinHoldingBlocksUpdated(uint256 oldBlocks, uint256 newBlocks);
+    event FlashLoanProtectionTriggered(address indexed user, uint256 indexed poolId, uint256 blocksRemaining);
+    event ZeroAddressSkipped(address indexed user);
 
     // =============================================================================
-    // 错误
+    // Errors
     // =============================================================================
 
     error ZeroAddress();
     error PoolAlreadyExists(address lpToken);
     error PoolNotFound(uint256 poolId);
-    error PoolNotFoundByToken(address lpToken);
     error MaxPoolsReached();
     error InvalidMultiplier();
     error BatchTooLarge(uint256 size, uint256 max);
     error TooManyOperations(uint256 operations, uint256 max);
-    error LPTokenCallFailed(uint256 poolId, address lpToken);
 
     // =============================================================================
-    // 构造函数和初始化器
+    // Constructor & Initializer
     // =============================================================================
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -137,11 +131,11 @@ contract LPModule is
         _disableInitializers();
     }
 
-    /// @notice 初始化合约
-    /// @param admin 管理员地址
-    /// @param keeper Keeper 地址
-    /// @param upgrader 升级者地址
-    /// @param _baseRate 每 LP 每秒的基础积分率
+    /// @notice Initialize the contract
+    /// @param admin Admin address
+    /// @param keeper Keeper address
+    /// @param upgrader Upgrader address
+    /// @param _baseRate Base points rate per LP per second
     function initialize(address admin, address keeper, address upgrader, uint256 _baseRate) external initializer {
         if (admin == address(0) || keeper == address(0) || upgrader == address(0)) revert ZeroAddress();
 
@@ -152,7 +146,7 @@ contract LPModule is
 
         basePointsRatePerSecond = _baseRate;
         active = true;
-        minHoldingBlocks = 1; // 默认: 1 个区块用于闪电贷保护
+        minHoldingBlocks = 1; // Default: 1 block for flash loan protection
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(ADMIN_ROLE, admin);
@@ -161,7 +155,7 @@ contract LPModule is
     }
 
     // =============================================================================
-    // UUPS 升级
+    // UUPS Upgrade
     // =============================================================================
 
     function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) {
@@ -169,114 +163,87 @@ contract LPModule is
     }
 
     // =============================================================================
-    // 核心逻辑 - 内部函数
+    // Core Logic - Credit Card Points Calculation
     // =============================================================================
 
-    /// @notice 计算池的当前每 LP 积分
-    /// @dev 使用 try-catch 优雅地处理 LP token 调用失败
-    function _getPoolPointsPerLp(uint256 poolId) internal view returns (uint256) {
+    /// @notice 计算用户在特定池从上次累计到现在的积分
+    /// @dev 信用卡模式：积分 = lpBalance × multiplier × baseRate × duration / MULTIPLIER_BASE
+    function _calculatePoolPointsSinceLastAccrual(address user, uint256 poolId) internal view returns (uint256) {
         PoolConfig storage pool = pools[poolId];
-        PoolState storage state = poolStates[poolId];
+        UserPoolState storage userState = userPoolStates[user][poolId];
 
-        if (!pool.isActive || !active) return state.pointsPerLpStored;
+        if (!pool.isActive || !active) return 0;
+        if (userState.lastBalance == 0) return 0;
 
-        uint256 totalLp;
-        try IERC20(pool.lpToken).totalSupply() returns (uint256 supply) {
-            totalLp = supply;
-        } catch {
-            // LP token 调用失败，返回存储的值
-            return state.pointsPerLpStored;
-        }
+        uint256 duration = block.timestamp - userState.lastAccrualTime;
+        if (duration == 0) return 0;
 
-        if (totalLp == 0) return state.pointsPerLpStored;
-
-        uint256 timeDelta = block.timestamp - state.lastUpdateTime;
         uint256 effectiveRate = (basePointsRatePerSecond * pool.multiplier) / MULTIPLIER_BASE;
-        uint256 newPoints = timeDelta * effectiveRate;
-
-        return state.pointsPerLpStored + (newPoints * PRECISION) / totalLp;
+        return userState.lastBalance * effectiveRate * duration;
     }
 
-    /// @notice 更新池的全局状态
-    function _updatePoolGlobal(uint256 poolId) internal {
-        PoolState storage state = poolStates[poolId];
-
-        state.pointsPerLpStored = _getPoolPointsPerLp(poolId);
-        state.lastUpdateTime = block.timestamp;
-
-        emit GlobalPoolCheckpointed(poolId, state.pointsPerLpStored, block.timestamp);
+    /// @notice 计算用户在特定池的总积分（已累计 + 待累计）
+    function _calculateUserPoolPoints(address user, uint256 poolId) internal view returns (uint256) {
+        UserPoolState storage userState = userPoolStates[user][poolId];
+        return userState.accruedPoints + _calculatePoolPointsSinceLastAccrual(user, poolId);
     }
 
-    /// @notice 更新池的用户状态
-    /// @dev 使用 try-catch 优雅地处理 LP token 调用失败
-    ///      包含通过 minHoldingBlocks 的闪电贷保护
+    /// @notice 累计用户在特定池的积分
+    function _accrueUserPoolPoints(address user, uint256 poolId) internal {
+        UserPoolState storage userState = userPoolStates[user][poolId];
+
+        uint256 newPoints = _calculatePoolPointsSinceLastAccrual(user, poolId);
+        if (newPoints > 0) {
+            userState.accruedPoints += newPoints;
+        }
+        userState.lastAccrualTime = block.timestamp;
+    }
+
+    /// @notice 更新用户在池中的状态
+    /// @dev 包含闪电贷保护
     function _updateUserPool(address user, uint256 poolId) internal {
         PoolConfig storage pool = pools[poolId];
         UserPoolState storage userState = userPoolStates[user][poolId];
-        PoolState storage poolState = poolStates[poolId];
 
-        uint256 cachedPointsPerLp = poolState.pointsPerLpStored;
-        uint256 lastBalance = userState.lastBalance;
-        uint256 lastCheckpointBlock = userState.lastCheckpointBlock;
+        // 闪电贷保护检查
+        bool passedHoldingPeriod =
+            userState.lastCheckpointBlock == 0 || block.number >= userState.lastCheckpointBlock + minHoldingBlocks;
 
-        // 闪电贷保护: 只有在最小持有区块数通过后才计入积分
-        // 这防止攻击者借入代币、检查点后在同一区块内归还
-        bool passedHoldingPeriod = lastCheckpointBlock == 0 || block.number >= lastCheckpointBlock + minHoldingBlocks;
-
-        // 使用最后记录的余额计算新获得的积分
-        // 只有在满足持有期要求时才计入
-        if (lastBalance > 0 && passedHoldingPeriod) {
-            uint256 pointsDelta = cachedPointsPerLp - userState.pointsPerLpPaid;
-            uint256 newEarned = (lastBalance * pointsDelta) / PRECISION;
-            userState.pointsEarned += newEarned;
+        if (!passedHoldingPeriod) {
+            uint256 blocksRemaining = (userState.lastCheckpointBlock + minHoldingBlocks) - block.number;
+            emit FlashLoanProtectionTriggered(user, poolId, blocksRemaining);
+            // 不累计积分，但仍然更新余额
+        } else {
+            // 累计积分
+            _accrueUserPoolPoints(user, poolId);
         }
 
-        // 使用 try-catch 更新用户状态以处理 LP token 调用
+        // 获取当前余额
         uint256 currentBalance;
         try IERC20(pool.lpToken).balanceOf(user) returns (uint256 balance) {
             currentBalance = balance;
         } catch {
-            // LP token 调用失败，保持最后的余额
-            currentBalance = lastBalance;
+            currentBalance = userState.lastBalance;
             emit LPTokenQueryFailed(poolId, pool.lpToken);
         }
 
-        userState.pointsPerLpPaid = cachedPointsPerLp;
+        // 更新状态
         userState.lastBalance = currentBalance;
-        userState.lastCheckpoint = block.timestamp;
+        userState.lastAccrualTime = block.timestamp;
         userState.lastCheckpointBlock = block.number;
 
-        emit UserPoolCheckpointed(user, poolId, userState.pointsEarned, currentBalance);
-    }
-
-    /// @notice 计算特定池的用户积分（实时）
-    function _getUserPoolPoints(address user, uint256 poolId) internal view returns (uint256) {
-        PoolConfig storage pool = pools[poolId];
-        UserPoolState storage userState = userPoolStates[user][poolId];
-
-        if (!pool.isActive || !active) return userState.pointsEarned;
-
-        uint256 cachedPointsPerLp = _getPoolPointsPerLp(poolId);
-        uint256 lastBalance = userState.lastBalance;
-
-        uint256 earned = userState.pointsEarned;
-        if (lastBalance > 0) {
-            uint256 pointsDelta = cachedPointsPerLp - userState.pointsPerLpPaid;
-            earned += (lastBalance * pointsDelta) / PRECISION;
-        }
-
-        return earned;
+        emit UserPoolCheckpointed(user, poolId, userState.accruedPoints, currentBalance, block.timestamp);
     }
 
     // =============================================================================
-    // 视图函数 - IPointsModule 实现
+    // View Functions - IPointsModule Implementation
     // =============================================================================
 
     /// @notice 获取用户在所有池中的总积分
     function getPoints(address user) external view override returns (uint256 total) {
         uint256 len = pools.length;
         for (uint256 i = 0; i < len;) {
-            total += _getUserPoolPoints(user, i);
+            total += _calculateUserPoolPoints(user, i);
             unchecked {
                 ++i;
             }
@@ -294,7 +261,7 @@ contract LPModule is
     }
 
     // =============================================================================
-    // 视图函数 - 附加函数
+    // View Functions - Additional
     // =============================================================================
 
     /// @notice 获取池的数量
@@ -306,14 +273,7 @@ contract LPModule is
     function getPool(uint256 poolId)
         external
         view
-        returns (
-            address lpToken,
-            uint256 multiplier,
-            bool poolActive,
-            string memory name,
-            uint256 totalSupply,
-            uint256 pointsPerLp
-        )
+        returns (address lpToken, uint256 multiplier, bool poolActive, string memory name, uint256 totalSupply)
     {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
 
@@ -323,18 +283,17 @@ contract LPModule is
         poolActive = pool.isActive;
         name = pool.name;
 
-        // 使用 try-catch 的安全 ERC20 调用
-        try IERC20(pool.lpToken).totalSupply() returns (uint256 supply) {
-            totalSupply = supply;
-        } catch {
-            totalSupply = 0;
+        // Skip totalSupply call for removed pools (lpToken == address(0))
+        if (lpToken != address(0)) {
+            try IERC20(pool.lpToken).totalSupply() returns (uint256 supply) {
+                totalSupply = supply;
+            } catch {
+                totalSupply = 0;
+            }
         }
-
-        pointsPerLp = _getPoolPointsPerLp(poolId);
     }
 
     /// @notice 获取用户按池分类的积分明细
-    /// @dev 对 LP token 调用使用 try-catch 以防止 DoS
     function getUserPoolBreakdown(address user)
         external
         view
@@ -353,10 +312,9 @@ contract LPModule is
 
         for (uint256 i = 0; i < len;) {
             names[i] = pools[i].name;
-            points[i] = _getUserPoolPoints(user, i);
+            points[i] = _calculateUserPoolPoints(user, i);
             multipliers[i] = pools[i].multiplier;
 
-            // 安全的 ERC20 调用
             try IERC20(pools[i].lpToken).balanceOf(user) returns (uint256 balance) {
                 balances[i] = balance;
             } catch {
@@ -377,7 +335,7 @@ contract LPModule is
             uint256 balance,
             uint256 lastCheckpointBalance,
             uint256 earnedPoints,
-            uint256 lastCheckpointTime,
+            uint256 lastAccrualTime,
             uint256 lastCheckpointBlock
         )
     {
@@ -385,7 +343,6 @@ contract LPModule is
 
         UserPoolState storage userState = userPoolStates[user][poolId];
 
-        // 安全的 ERC20 调用
         try IERC20(pools[poolId].lpToken).balanceOf(user) returns (uint256 bal) {
             balance = bal;
         } catch {
@@ -393,12 +350,12 @@ contract LPModule is
         }
 
         lastCheckpointBalance = userState.lastBalance;
-        earnedPoints = _getUserPoolPoints(user, poolId);
-        lastCheckpointTime = userState.lastCheckpoint;
+        earnedPoints = _calculateUserPoolPoints(user, poolId);
+        lastAccrualTime = userState.lastAccrualTime;
         lastCheckpointBlock = userState.lastCheckpointBlock;
     }
 
-    /// @notice 估算 LP 金额在持续时间内的积分
+    /// @notice 估算 LP 金额在特定时长内的积分（信用卡模式 - 固定积分率）
     function estimatePoolPoints(uint256 poolId, uint256 lpAmount, uint256 durationSeconds)
         external
         view
@@ -408,28 +365,15 @@ contract LPModule is
         PoolConfig storage pool = pools[poolId];
         if (!pool.isActive) return 0;
 
-        uint256 totalSupply;
-        try IERC20(pool.lpToken).totalSupply() returns (uint256 supply) {
-            totalSupply = supply;
-        } catch {
-            return 0;
-        }
-
-        if (totalSupply == 0) return 0;
-
         uint256 effectiveRate = (basePointsRatePerSecond * pool.multiplier) / MULTIPLIER_BASE;
-        uint256 pointsGenerated = durationSeconds * effectiveRate;
-        return (lpAmount * pointsGenerated) / totalSupply;
+        return lpAmount * effectiveRate * durationSeconds;
     }
 
     // =============================================================================
-    // 池管理 - 管理员
+    // Pool Management - Admin
     // =============================================================================
 
     /// @notice 添加新的 LP 池
-    /// @param lpToken LP token 地址
-    /// @param multiplier 积分倍数 (100 = 1x)
-    /// @param name 池名称
     function addPool(address lpToken, uint256 multiplier, string calldata name) external onlyRole(ADMIN_ROLE) {
         if (lpToken == address(0)) revert ZeroAddress();
         if (poolIndex[lpToken] != 0) revert PoolAlreadyExists(lpToken);
@@ -439,22 +383,15 @@ contract LPModule is
         uint256 poolId = pools.length;
         pools.push(PoolConfig({lpToken: lpToken, multiplier: multiplier, isActive: true, name: name}));
 
-        poolIndex[lpToken] = poolId + 1; // +1 以区分"未找到"
-        poolStates[poolId].lastUpdateTime = block.timestamp;
+        poolIndex[lpToken] = poolId + 1; // +1 to distinguish from "not found"
 
         emit PoolAdded(poolId, lpToken, multiplier, name);
     }
 
     /// @notice 更新池配置
-    /// @param poolId 池 ID
-    /// @param multiplier 新倍数
-    /// @param poolActive 池是否激活
     function updatePool(uint256 poolId, uint256 multiplier, bool poolActive) external onlyRole(ADMIN_ROLE) {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
         if (multiplier == 0 || multiplier > MAX_MULTIPLIER) revert InvalidMultiplier();
-
-        // 首先使用旧设置检查点
-        _updatePoolGlobal(poolId);
 
         pools[poolId].multiplier = multiplier;
         pools[poolId].isActive = poolActive;
@@ -471,21 +408,13 @@ contract LPModule is
     }
 
     /// @notice 移除池（标记为非激活并清除映射）
-    /// @dev 不从数组中删除以保持 poolId 稳定性
-    /// @param poolId 要移除的池 ID
     function removePool(uint256 poolId) external onlyRole(ADMIN_ROLE) {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
 
         PoolConfig storage pool = pools[poolId];
         address lpToken = pool.lpToken;
 
-        // 移除前检查点最终状态
-        _updatePoolGlobal(poolId);
-
-        // 清除池索引映射
         poolIndex[lpToken] = 0;
-
-        // 将池标记为非激活并清除 LP token（防止未来操作）
         pool.isActive = false;
         pool.lpToken = address(0);
         pool.multiplier = 0;
@@ -494,45 +423,15 @@ contract LPModule is
     }
 
     // =============================================================================
-    // 检查点函数
+    // Checkpoint Functions
     // =============================================================================
 
-    /// @notice 内部函数: 检查点所有池的全局状态
-    function _checkpointAllPoolsInternal() internal {
-        uint256 len = pools.length;
-        for (uint256 i = 0; i < len;) {
-            _updatePoolGlobal(i);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /// @notice 内部函数: 检查点用户在所有池中的状态
+    /// @notice 检查点用户在所有池中的状态
     function _checkpointUser(address user) internal {
         uint256 len = pools.length;
         for (uint256 i = 0; i < len;) {
-            _updatePoolGlobal(i);
-            _updateUserPool(user, i);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /// @notice 检查点所有池 (keeper 函数)
-    function checkpointAllPools() external onlyRole(KEEPER_ROLE) {
-        _checkpointAllPoolsInternal();
-    }
-
-    /// @notice 检查点特定的池
-    function checkpointPools(uint256[] calldata poolIds) external onlyRole(KEEPER_ROLE) {
-        uint256 len = poolIds.length;
-        for (uint256 i = 0; i < len;) {
-            if (poolIds[i] < pools.length) {
-                _updatePoolGlobal(poolIds[i]);
-            } else {
-                emit CheckpointPoolSkipped(poolIds[i], "PoolNotFound");
+            if (pools[i].isActive) {
+                _updateUserPool(user, i);
             }
             unchecked {
                 ++i;
@@ -541,7 +440,6 @@ contract LPModule is
     }
 
     /// @notice 检查点用户在所有池中的状态 (keeper 函数)
-    /// @dev 限制为 MAX_BATCH_USERS 以防止 gas 限制问题
     function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE) {
         uint256 userLen = users.length;
         if (userLen > MAX_BATCH_USERS) revert BatchTooLarge(userLen, MAX_BATCH_USERS);
@@ -552,14 +450,11 @@ contract LPModule is
             revert TooManyOperations(totalOps, MAX_OPERATIONS_PER_BATCH);
         }
 
-        _checkpointAllPoolsInternal();
-
         for (uint256 u = 0; u < userLen;) {
-            for (uint256 p = 0; p < poolLen;) {
-                _updateUserPool(users[u], p);
-                unchecked {
-                    ++p;
-                }
+            if (users[u] != address(0)) {
+                _checkpointUser(users[u]);
+            } else {
+                emit ZeroAddressSkipped(users[u]);
             }
             unchecked {
                 ++u;
@@ -580,48 +475,27 @@ contract LPModule is
     /// @notice 检查点用户在特定池中的状态
     function checkpointUserPool(address user, uint256 poolId) external {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
-        _updatePoolGlobal(poolId);
         _updateUserPool(user, poolId);
     }
 
     // =============================================================================
-    // 管理员函数
+    // Admin Functions
     // =============================================================================
-
-    /// @notice 内部函数: 重置所有池的时间戳为当前时间
-    function _resetAllPoolTimestamps() internal {
-        uint256 len = pools.length;
-        for (uint256 i = 0; i < len;) {
-            poolStates[i].lastUpdateTime = block.timestamp;
-            unchecked {
-                ++i;
-            }
-        }
-    }
 
     /// @notice 设置基础积分率
     function setBaseRate(uint256 newRate) external onlyRole(ADMIN_ROLE) {
-        _checkpointAllPoolsInternal();
-
         uint256 oldRate = basePointsRatePerSecond;
         basePointsRatePerSecond = newRate;
-
         emit BaseRateUpdated(oldRate, newRate);
     }
 
     /// @notice 设置模块激活状态
     function setActive(bool _active) external onlyRole(ADMIN_ROLE) {
-        if (_active && !active) {
-            _resetAllPoolTimestamps();
-        } else if (!_active && active) {
-            _checkpointAllPoolsInternal();
-        }
         active = _active;
         emit ModuleActiveStatusUpdated(_active);
     }
 
     /// @notice 设置闪电贷保护的最小持有区块数
-    /// @param blocks 余额必须持有的最小区块数
     function setMinHoldingBlocks(uint256 blocks) external onlyRole(ADMIN_ROLE) {
         uint256 oldBlocks = minHoldingBlocks;
         minHoldingBlocks = blocks;
@@ -629,27 +503,24 @@ contract LPModule is
     }
 
     /// @notice 暂停合约操作
-    /// @dev 只能由 ADMIN_ROLE 调用
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
     /// @notice 恢复合约操作
-    /// @dev 只能由 ADMIN_ROLE 调用
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
 
     /// @notice 获取合约版本
-    /// @return 版本字符串
     function version() external pure returns (string memory) {
         return VERSION;
     }
 
     // =============================================================================
-    // 存储间隙 - 为未来升级保留
+    // Storage Gap - Reserved for future upgrades
     // =============================================================================
 
-    /// @dev 保留的存储空间，允许未来升级时的布局变更
+    /// @dev Reserved storage space to allow future layout changes
     uint256[50] private __gap;
 }

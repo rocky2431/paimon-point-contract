@@ -6,7 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 import {PointsHub} from "../src/PointsHub.sol";
-import {HoldingModule} from "../src/HoldingModule.sol";
+import {StakingModule} from "../src/StakingModule.sol";
 import {LPModule} from "../src/LPModule.sol";
 import {ActivityModule} from "../src/ActivityModule.sol";
 import {PenaltyModule} from "../src/PenaltyModule.sol";
@@ -30,12 +30,12 @@ contract SecurityTest is BaseTest {
         pointsHub.upgradeToAndCall(address(newImpl), "");
     }
 
-    function test_revert_upgrade_holdingModule_unauthorized() public {
-        HoldingModule newImpl = new HoldingModule();
+    function test_revert_upgrade_stakingModule_unauthorized() public {
+        StakingModule newImpl = new StakingModule();
 
         vm.prank(user1);
         vm.expectRevert();
-        holdingModule.upgradeToAndCall(address(newImpl), "");
+        stakingModule.upgradeToAndCall(address(newImpl), "");
     }
 
     function test_revert_upgrade_lpModule_unauthorized() public {
@@ -62,14 +62,14 @@ contract SecurityTest is BaseTest {
         penaltyModule.upgradeToAndCall(address(newImpl), "");
     }
 
-    function test_upgrade_holdingModule_authorized() public {
-        HoldingModule newImpl = new HoldingModule();
+    function test_upgrade_stakingModule_authorized() public {
+        StakingModule newImpl = new StakingModule();
 
         vm.prank(upgrader);
-        holdingModule.upgradeToAndCall(address(newImpl), "");
+        stakingModule.upgradeToAndCall(address(newImpl), "");
 
         // Verify upgrade succeeded by checking version is still accessible
-        assertEq(holdingModule.VERSION(), "1.3.0");
+        assertEq(stakingModule.VERSION(), "2.0.0");
     }
 
     // ============================================
@@ -121,41 +121,33 @@ contract SecurityTest is BaseTest {
     }
 
     // ============================================
-    // Flash Loan Protection Tests - HoldingModule
+    // Flash Loan Protection Tests - StakingModule
     // ============================================
 
-    function test_holdingModule_flashLoanProtection_defaultEnabled() public {
+    function test_stakingModule_flashLoanProtection_defaultEnabled() public {
         // Default minHoldingBlocks should be 1
-        assertEq(holdingModule.minHoldingBlocks(), 1);
+        assertEq(stakingModule.minHoldingBlocks(), 1);
     }
 
-    function test_holdingModule_flashLoanProtection_blocksImmediatePoints() public {
-        // Setup: User gets PPT tokens
+    function test_stakingModule_flashLoanProtection_blocksImmediatePoints() public {
+        // Setup: User gets PPT tokens and stakes
         ppt.mint(user1, 1000 * 1e18);
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
 
-        // First checkpoint - records balance
-        vm.prank(user1);
-        holdingModule.checkpointSelf();
+        // In same block, points should be 0 due to flash loan protection
+        uint256 pointsInSameBlock = stakingModule.getPoints(user1);
+        assertEq(pointsInSameBlock, 0, "Points should be 0 in same block");
 
-        // Advance time but stay in same block
-        _advanceTime(1 hours);
-
-        // Second checkpoint in same block
-        vm.prank(user1);
-        holdingModule.checkpointSelf();
-
-        uint256 pointsInSameBlock = holdingModule.getPoints(user1);
-
-        // Advance blocks
+        // Advance blocks and time
         _advanceBlocks(2);
         _advanceTime(1 hours);
 
-        vm.prank(user1);
-        holdingModule.checkpointSelf();
+        uint256 pointsAfterBlocks = stakingModule.getPoints(user1);
 
-        uint256 pointsAfterBlocks = holdingModule.getPoints(user1);
-
-        // Points should only accumulate after block requirement is met
+        // Points should now accumulate after block requirement is met
         assertGt(pointsAfterBlocks, pointsInSameBlock, "Points should increase after holding period");
     }
 
@@ -250,12 +242,12 @@ contract SecurityTest is BaseTest {
     }
 
     function test_pointsHub_getTotalPointsWithStatus() public {
-        // Setup: User has PPT balance
+        // Setup: User stakes PPT
         ppt.mint(user1, 1000 * 1e18);
-
-        // Checkpoint
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
 
         _advanceTime(1 hours);
         _advanceBlocks(2);
@@ -265,11 +257,11 @@ contract SecurityTest is BaseTest {
 
         // All 3 modules should succeed
         assertEq(moduleSuccess.length, 3);
-        assertTrue(moduleSuccess[0], "HoldingModule should succeed");
+        assertTrue(moduleSuccess[0], "StakingModule should succeed");
         assertTrue(moduleSuccess[1], "LPModule should succeed (inactive is ok)");
         assertTrue(moduleSuccess[2], "ActivityModule should succeed (inactive is ok)");
 
-        // Should have points from HoldingModule
+        // Should have points from StakingModule
         assertGt(total, 0);
     }
 
@@ -278,10 +270,13 @@ contract SecurityTest is BaseTest {
     // ============================================
 
     function test_revert_redeem_insufficientRewardTokens() public {
-        // Setup: User has points
+        // Setup: User stakes and earns points
         ppt.mint(user1, 1000 * 1e18);
-        vm.prank(keeper);
-        holdingModule.checkpointUsers(toArray(user1));
+        vm.startPrank(user1);
+        ppt.approve(address(stakingModule), 1000 * 1e18);
+        stakingModule.stakeFlexible(1000 * 1e18);
+        vm.stopPrank();
+
         _advanceTime(1 days);
         _advanceBlocks(2);
 
