@@ -11,14 +11,14 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {IPointsModule} from "./interfaces/IPointsModule.sol";
 
-/// @title StakingModule
+/// @title 质押模块
 /// @author Paimon Protocol
-/// @notice Points module for PPT staking with time-locked boost
-/// @dev Uses Synthetix-style rewards with boost based on lock duration
-///      Replaces HoldingModule for users who want enhanced points via staking
-///      Note: MAX_STAKES_PER_USER (10) is a lifetime limit per address.
-///      Once a user creates 10 stakes, they cannot create more even after unstaking.
-///      Users needing more stakes should use a new address.
+/// @notice 带时间锁定加成的PPT质押积分模块
+/// @dev 使用Synthetix风格的奖励机制，根据锁定期提供加成
+///      取代HoldingModule，为希望通过质押获得增强积分的用户提供服务
+///      注意：MAX_STAKES_PER_USER（10）是每个地址的终身限制
+///      一旦用户创建了10个质押，即使解除质押后也无法创建更多
+///      需要更多质押的用户应使用新地址
 contract StakingModule is
     IPointsModule,
     Initializable,
@@ -38,8 +38,8 @@ contract StakingModule is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
     uint256 public constant PRECISION = 1e18;
-    uint256 public constant BOOST_BASE = 10000; // 1x = 10000, 2x = 20000
-    uint256 public constant MAX_EXTRA_BOOST = 10000; // Max extra 1x (total 2x)
+    uint256 public constant BOOST_BASE = 10000; // 1倍 = 10000, 2倍 = 20000
+    uint256 public constant MAX_EXTRA_BOOST = 10000; // 最大额外加成1倍（总共2倍）
     uint256 public constant MIN_LOCK_DURATION = 7 days;
     uint256 public constant MAX_LOCK_DURATION = 365 days;
     uint256 public constant EARLY_UNLOCK_PENALTY_BPS = 5000; // 50%
@@ -50,72 +50,72 @@ contract StakingModule is
 
     uint256 public constant MAX_BATCH_USERS = 100;
 
-    /// @notice Maximum stake amount to prevent uint128 overflow (with 2x boost headroom)
+    /// @notice 最大质押金额，防止uint128溢出（预留2倍加成空间）
     uint256 public constant MAX_STAKE_AMOUNT = type(uint128).max / 2;
 
-    /// @notice Minimum points rate per second
+    /// @notice 每秒最小积分率
     uint256 public constant MIN_POINTS_RATE = 1;
 
-    /// @notice Maximum points rate per second (prevents overflow in calculations)
+    /// @notice 每秒最大积分率（防止计算溢出）
     uint256 public constant MAX_POINTS_RATE = 1e24;
 
     // =============================================================================
     // Data Structures
     // =============================================================================
 
-    /// @notice Individual stake record
-    /// @dev Optimized packing into 2 storage slots:
-    ///      slot1 = amount(128) + boostedAmount(128) = 256 bits
-    ///      slot2 = pointsEarnedAtStake(128) + lockEndTime(64) + lockDuration(56) + isActive(8) = 256 bits
+    /// @notice 单个质押记录
+    /// @dev 优化打包到2个存储槽：
+    ///      槽1 = amount(128) + boostedAmount(128) = 256位
+    ///      槽2 = pointsEarnedAtStake(128) + lockEndTime(64) + lockDuration(56) + isActive(8) = 256位
     struct StakeInfo {
-        uint128 amount; // Staked amount
-        uint128 boostedAmount; // amount * boost / BOOST_BASE
-        uint128 pointsEarnedAtStake; // Points earned at stake time (for penalty calc)
-        uint64 lockEndTime; // When lock expires
-        uint56 lockDuration; // Lock duration in seconds (max ~2.28e9 years, limited by MAX_LOCK_DURATION)
-        bool isActive; // Whether stake is active
+        uint128 amount; // 质押金额
+        uint128 boostedAmount; // amount × boost / BOOST_BASE
+        uint128 pointsEarnedAtStake; // 质押时已赚取的积分（用于惩罚计算）
+        uint64 lockEndTime; // 锁定到期时间
+        uint56 lockDuration; // 锁定期（秒），最大约2.28e9年，受MAX_LOCK_DURATION限制
+        bool isActive; // 质押是否活跃
     }
 
-    /// @notice Aggregated user state for O(1) getPoints
+    /// @notice 聚合用户状态，用于O(1)复杂度的getPoints
     struct UserState {
-        uint256 totalBoostedAmount; // Sum of all active stakes' boostedAmount
-        uint256 pointsPerSharePaid; // Last checkpoint pointsPerShare
-        uint256 pointsEarned; // Accumulated points (net of penalties)
-        uint256 lastCheckpointBlock; // For flash loan protection
+        uint256 totalBoostedAmount; // 所有活跃质押的boostedAmount总和
+        uint256 pointsPerSharePaid; // 上次检查点的每份额积分
+        uint256 pointsEarned; // 累积积分（扣除惩罚后）
+        uint256 lastCheckpointBlock; // 用于闪电贷保护
     }
 
     // =============================================================================
     // State Variables
     // =============================================================================
 
-    /// @notice PPT token contract
+    /// @notice PPT代币合约
     IERC20 public ppt;
 
-    /// @notice Points generated per second per boosted PPT share (1e18 precision)
+    /// @notice 每秒每个加成PPT份额生成的积分（1e18精度）
     uint256 public pointsRatePerSecond;
 
-    /// @notice Last time the global state was updated
+    /// @notice 上次更新全局状态的时间
     uint256 public lastUpdateTime;
 
-    /// @notice Accumulated points per boosted share (1e18 precision)
+    /// @notice 每个加成份额累积的积分（1e18精度）
     uint256 public pointsPerShareStored;
 
-    /// @notice Total boosted amount staked across all users
+    /// @notice 所有用户的总加成质押量
     uint256 public totalBoostedStaked;
 
-    /// @notice User state mapping
+    /// @notice 用户状态映射
     mapping(address => UserState) public userStates;
 
-    /// @notice User stakes: user => stakeIndex => StakeInfo
+    /// @notice 用户质押：用户 => 质押索引 => 质押信息
     mapping(address => mapping(uint256 => StakeInfo)) public userStakes;
 
-    /// @notice Number of stakes per user (including inactive)
+    /// @notice 每个用户的质押数量（包括非活跃的）
     mapping(address => uint256) public userStakeCount;
 
-    /// @notice Whether the module is active
+    /// @notice 模块是否激活
     bool public active;
 
-    /// @notice Minimum blocks required before points are credited (flash loan protection)
+    /// @notice 积分计入前所需的最少区块数（闪电贷保护）
     uint256 public minHoldingBlocks;
 
     // =============================================================================
@@ -131,14 +131,14 @@ contract StakingModule is
         uint256 lockEndTime
     );
 
-    /// @notice Emitted when a user unstakes
-    /// @param user The user address
-    /// @param stakeIndex The stake index
-    /// @param amount The staked amount returned
-    /// @param actualPenalty The penalty actually applied (may be capped)
-    /// @param theoreticalPenalty The calculated penalty before capping
-    /// @param isEarlyUnlock Whether this was an early unlock
-    /// @param penaltyWasCapped Whether the penalty was capped at earned points
+    /// @notice 当用户解除质押时触发
+    /// @param user 用户地址
+    /// @param stakeIndex 质押索引
+    /// @param amount 返还的质押金额
+    /// @param actualPenalty 实际应用的惩罚（可能被限制）
+    /// @param theoreticalPenalty 限制前计算的惩罚
+    /// @param isEarlyUnlock 是否为提前解锁
+    /// @param penaltyWasCapped 惩罚是否被限制在已赚取积分范围内
     event Unstaked(
         address indexed user,
         uint256 indexed stakeIndex,
@@ -155,13 +155,13 @@ contract StakingModule is
         address indexed user, uint256 pointsEarned, uint256 totalBoostedAmount, uint256 timestamp, bool pointsCredited
     );
 
-    /// @notice Emitted when flash loan protection prevents points from being credited
-    /// @param user The user address
-    /// @param blocksRemaining Blocks remaining before points can be credited
+    /// @notice 当闪电贷保护阻止积分计入时触发
+    /// @param user 用户地址
+    /// @param blocksRemaining 积分可以计入前剩余的区块数
     event FlashLoanProtectionTriggered(address indexed user, uint256 blocksRemaining);
 
-    /// @notice Emitted when a zero address is skipped in batch checkpoint
-    /// @param position Position in the batch array
+    /// @notice 当批量检查点中跳过零地址时触发
+    /// @param position 批量数组中的位置
     event ZeroAddressSkipped(uint256 indexed position);
 
     event PointsRateUpdated(uint256 oldRate, uint256 newRate);
@@ -182,22 +182,22 @@ contract StakingModule is
     error StakeNotActive(uint256 stakeIndex);
     error BatchTooLarge(uint256 size, uint256 max);
 
-    /// @notice Amount exceeds maximum allowed to prevent overflow
+    /// @notice 金额超过允许的最大值以防止溢出
     error AmountTooLarge(uint256 amount, uint256 max);
 
-    /// @notice Points rate is outside valid range
+    /// @notice 积分率超出有效范围
     error InvalidPointsRate(uint256 rate, uint256 min, uint256 max);
 
-    /// @notice Address is not a contract
+    /// @notice 地址不是合约
     error NotAContract(address addr);
 
-    /// @notice Address does not implement ERC20 interface
+    /// @notice 地址未实现ERC20接口
     error InvalidERC20(address addr);
 
-    /// @notice Points overflow detected (should never happen under normal operation)
+    /// @notice 检测到积分溢出（正常操作下不应发生）
     error PointsOverflow(uint256 points);
 
-    /// @notice Hold duration exceeds lock duration
+    /// @notice 持有期超过锁定期
     error InvalidHoldDuration(uint256 holdDuration, uint256 lockDuration);
 
     // =============================================================================
@@ -209,12 +209,12 @@ contract StakingModule is
         _disableInitializers();
     }
 
-    /// @notice Initialize the contract
-    /// @param _ppt PPT token address (must be a valid ERC20 contract)
-    /// @param admin Admin address
-    /// @param keeper Keeper address (for checkpoints)
-    /// @param upgrader Upgrader address (typically timelock)
-    /// @param _pointsRatePerSecond Initial points rate per second per boosted PPT
+    /// @notice 初始化合约
+    /// @param _ppt PPT代币地址（必须是有效的ERC20合约）
+    /// @param admin 管理员地址
+    /// @param keeper Keeper地址（用于检查点）
+    /// @param upgrader 升级者地址（通常是时间锁）
+    /// @param _pointsRatePerSecond 每秒每个加成PPT的初始积分率
     function initialize(address _ppt, address admin, address keeper, address upgrader, uint256 _pointsRatePerSecond)
         external
         initializer
@@ -225,7 +225,7 @@ contract StakingModule is
         if (_ppt.code.length == 0) {
             revert NotAContract(_ppt);
         }
-        // Validate ERC20 interface
+        // 验证ERC20接口
         _validateERC20(_ppt);
         if (_pointsRatePerSecond < MIN_POINTS_RATE || _pointsRatePerSecond > MAX_POINTS_RATE) {
             revert InvalidPointsRate(_pointsRatePerSecond, MIN_POINTS_RATE, MAX_POINTS_RATE);
@@ -248,12 +248,12 @@ contract StakingModule is
         _grantRole(UPGRADER_ROLE, upgrader);
     }
 
-    /// @notice Validate that an address implements ERC20 interface
-    /// @param token Token address to validate
+    /// @notice 验证地址是否实现了ERC20接口
+    /// @param token 要验证的代币地址
     function _validateERC20(address token) internal view {
-        // Check basic ERC20 functions exist by calling view functions
+        // 通过调用视图函数检查基本的ERC20函数是否存在
         try IERC20(token).totalSupply() returns (uint256) {
-            // Valid - has totalSupply
+            // 有效 - 有totalSupply
         } catch {
             revert InvalidERC20(token);
         }
@@ -271,12 +271,12 @@ contract StakingModule is
     // Core Logic - Boost Calculation
     // =============================================================================
 
-    /// @notice Calculate boost multiplier based on lock duration (lenient version)
-    /// @param lockDuration Lock duration in seconds
-    /// @return boost Boost multiplier (BOOST_BASE = 1x)
-    /// @dev Linear: 7 days = 1.02x, 365 days = 2.0x
-    ///      Returns BOOST_BASE for duration < MIN_LOCK_DURATION
-    ///      Caps at MAX_LOCK_DURATION for duration > MAX_LOCK_DURATION
+    /// @notice 基于锁定期计算加成倍数（宽松版本）
+    /// @param lockDuration 锁定期（秒）
+    /// @return boost 加成倍数（BOOST_BASE = 1倍）
+    /// @dev 线性：7天 = 1.02倍，365天 = 2.0倍
+    ///      对于duration < MIN_LOCK_DURATION返回BOOST_BASE
+    ///      对于duration > MAX_LOCK_DURATION上限为MAX_LOCK_DURATION
     function calculateBoost(uint256 lockDuration) public pure returns (uint256 boost) {
         if (lockDuration < MIN_LOCK_DURATION) {
             return BOOST_BASE;
@@ -289,10 +289,10 @@ contract StakingModule is
         return BOOST_BASE + extraBoost;
     }
 
-    /// @notice Calculate boost multiplier with strict validation
-    /// @param lockDuration Lock duration in seconds
-    /// @return boost Boost multiplier (BOOST_BASE = 1x)
-    /// @dev Reverts if duration is outside valid range
+    /// @notice 使用严格验证计算加成倍数
+    /// @param lockDuration 锁定期（秒）
+    /// @return boost 加成倍数（BOOST_BASE = 1倍）
+    /// @dev 如果期限超出有效范围则回滚
     function calculateBoostStrict(uint256 lockDuration) public pure returns (uint256 boost) {
         if (lockDuration < MIN_LOCK_DURATION || lockDuration > MAX_LOCK_DURATION) {
             revert InvalidLockDuration(lockDuration, MIN_LOCK_DURATION, MAX_LOCK_DURATION);
@@ -302,10 +302,10 @@ contract StakingModule is
         return BOOST_BASE + extraBoost;
     }
 
-    /// @notice Calculate boosted amount
-    /// @param amount Raw staked amount
-    /// @param lockDuration Lock duration in seconds
-    /// @return Boosted amount
+    /// @notice 计算加成后的金额
+    /// @param amount 原始质押金额
+    /// @param lockDuration 锁定期（秒）
+    /// @return 加成后的金额
     function calculateBoostedAmount(uint256 amount, uint256 lockDuration) public pure returns (uint256) {
         uint256 boost = calculateBoost(lockDuration);
         return (amount * boost) / BOOST_BASE;
@@ -315,8 +315,8 @@ contract StakingModule is
     // Core Logic - Points Calculation
     // =============================================================================
 
-    /// @notice Calculate current points per share
-    /// @return Current accumulated points per boosted share
+    /// @notice 计算当前每份额积分
+    /// @return 当前每个加成份额的累积积分
     function _currentPointsPerShare() internal view returns (uint256) {
         if (!active) return pointsPerShareStored;
         if (totalBoostedStaked == 0) return pointsPerShareStored;
@@ -327,7 +327,7 @@ contract StakingModule is
         return pointsPerShareStored + (newPoints * PRECISION) / totalBoostedStaked;
     }
 
-    /// @notice Update global state
+    /// @notice 更新全局状态
     function _updateGlobal() internal {
         pointsPerShareStored = _currentPointsPerShare();
         lastUpdateTime = block.timestamp;
@@ -335,44 +335,44 @@ contract StakingModule is
         emit GlobalCheckpointed(pointsPerShareStored, block.timestamp, totalBoostedStaked);
     }
 
-    /// @notice Update user state
-    /// @param user User address to update
-    /// @return pointsCredited Whether points were credited (false if flash loan protection triggered)
-    /// @dev IMPORTANT: pointsPerSharePaid is only updated when points are successfully credited.
-    ///      This ensures flash loan protection doesn't cause permanent point loss.
+    /// @notice 更新用户状态
+    /// @param user 要更新的用户地址
+    /// @return pointsCredited 积分是否已计入（如果触发闪电贷保护则为false）
+    /// @dev 重要：只有在成功计入积分时才更新pointsPerSharePaid
+    ///      这确保闪电贷保护不会导致永久的积分损失
     function _updateUser(address user) internal returns (bool pointsCredited) {
         UserState storage state = userStates[user];
         uint256 cachedPointsPerShare = pointsPerShareStored;
         uint256 lastCheckpointBlock = state.lastCheckpointBlock;
 
-        // Flash loan protection
+        // 闪电贷保护
         bool passedHoldingPeriod = lastCheckpointBlock == 0 || block.number >= lastCheckpointBlock + minHoldingBlocks;
 
-        // Calculate new earned points using boosted amount
+        // 使用加成金额计算新赚取的积分
         if (state.totalBoostedAmount > 0 && passedHoldingPeriod) {
             uint256 pointsDelta = cachedPointsPerShare - state.pointsPerSharePaid;
             uint256 newEarned = (state.totalBoostedAmount * pointsDelta) / PRECISION;
             state.pointsEarned += newEarned;
-            // Only update pointsPerSharePaid when points are actually credited
+            // 只有在实际计入积分时才更新pointsPerSharePaid
             state.pointsPerSharePaid = cachedPointsPerShare;
             pointsCredited = true;
         } else if (state.totalBoostedAmount > 0 && !passedHoldingPeriod) {
-            // Emit event when flash loan protection triggers
-            // NOTE: pointsPerSharePaid is NOT updated here, so points are preserved for later
+            // 当触发闪电贷保护时触发事件
+            // 注意：这里不更新pointsPerSharePaid，所以积分会保留到以后
             uint256 blocksRemaining = (lastCheckpointBlock + minHoldingBlocks) - block.number;
             emit FlashLoanProtectionTriggered(user, blocksRemaining);
             pointsCredited = false;
         }
 
-        // Always update lastCheckpointBlock to track the holding period
+        // 始终更新lastCheckpointBlock以跟踪持有期
         state.lastCheckpointBlock = block.number;
 
         emit UserCheckpointed(user, state.pointsEarned, state.totalBoostedAmount, block.timestamp, pointsCredited);
     }
 
-    /// @notice Internal calculation of user points (view)
-    /// @param user User address
-    /// @return Total accumulated points
+    /// @notice 用户积分的内部计算（视图函数）
+    /// @param user 用户地址
+    /// @return 累积的总积分
     function _calculatePoints(address user) internal view returns (uint256) {
         UserState storage state = userStates[user];
 
@@ -390,10 +390,10 @@ contract StakingModule is
     // User Functions - Stake/Unstake
     // =============================================================================
 
-    /// @notice Stake PPT tokens with lock duration
-    /// @param amount Amount of PPT to stake
-    /// @param lockDuration Lock duration in seconds (7-365 days)
-    /// @return stakeIndex Index of the created stake
+    /// @notice 质押PPT代币并设置锁定期
+    /// @param amount 要质押的PPT数量
+    /// @param lockDuration 锁定期（秒），7-365天
+    /// @return stakeIndex 创建的质押索引
     function stake(uint256 amount, uint256 lockDuration)
         external
         nonReentrant
@@ -412,17 +412,17 @@ contract StakingModule is
             revert MaxStakesReached(currentCount, MAX_STAKES_PER_USER);
         }
 
-        // Update global and user state first
+        // 首先更新全局和用户状态
         _updateGlobal();
         _updateUser(user);
 
-        // Transfer PPT from user
+        // 从用户转入PPT
         ppt.safeTransferFrom(user, address(this), amount);
 
-        // Calculate boosted amount (safe due to MAX_STAKE_AMOUNT check)
+        // 计算加成金额（由于MAX_STAKE_AMOUNT检查是安全的）
         uint256 boostedAmount = calculateBoostedAmount(amount, lockDuration);
 
-        // Validate points don't overflow uint128 (defensive check)
+        // 验证积分不会溢出uint128（防御性检查）
         uint256 currentUserPoints = userStates[user].pointsEarned;
         if (currentUserPoints > type(uint128).max) {
             revert PointsOverflow(currentUserPoints);
@@ -430,7 +430,7 @@ contract StakingModule is
 
         uint64 lockEndTime = uint64(block.timestamp + lockDuration);
 
-        // Create stake record (all casts are now safe due to validation)
+        // 创建质押记录（由于验证，所有类型转换现在都是安全的）
         stakeIndex = currentCount;
         userStakes[user][stakeIndex] = StakeInfo({
             amount: uint128(amount),
@@ -441,7 +441,7 @@ contract StakingModule is
             isActive: true
         });
 
-        // Update aggregated state
+        // 更新聚合状态
         userStates[user].totalBoostedAmount += boostedAmount;
         totalBoostedStaked += boostedAmount;
         userStakeCount[user] = currentCount + 1;
@@ -449,9 +449,9 @@ contract StakingModule is
         emit Staked(user, stakeIndex, amount, lockDuration, boostedAmount, lockEndTime);
     }
 
-    /// @notice Unstake PPT tokens
-    /// @param stakeIndex Index of the stake to unstake
-    /// @dev If unlocking early, penalty is applied to points earned since stake
+    /// @notice 解除质押PPT代币
+    /// @param stakeIndex 要解除的质押索引
+    /// @dev 如果提前解锁，将对质押后赚取的积分应用惩罚
     function unstake(uint256 stakeIndex) external nonReentrant whenNotPaused {
         address user = msg.sender;
 
@@ -464,7 +464,7 @@ contract StakingModule is
             revert StakeNotActive(stakeIndex);
         }
 
-        // Update global and user state first
+        // 首先更新全局和用户状态
         _updateGlobal();
         _updateUser(user);
 
@@ -475,7 +475,7 @@ contract StakingModule is
         uint256 actualPenalty = 0;
         bool penaltyWasCapped = false;
 
-        // Calculate and apply penalty for early unlock
+        // 计算并应用提前解锁的惩罚
         if (isEarlyUnlock) {
             theoreticalPenalty = _calculateEarlyUnlockPenalty(user, stakeInfo);
             if (theoreticalPenalty > 0) {
@@ -483,7 +483,7 @@ contract StakingModule is
                     actualPenalty = theoreticalPenalty;
                     userStates[user].pointsEarned -= theoreticalPenalty;
                 } else {
-                    // Cap penalty at earned points
+                    // 将惩罚限制在已赚取的积分范围内
                     actualPenalty = userStates[user].pointsEarned;
                     userStates[user].pointsEarned = 0;
                     penaltyWasCapped = true;
@@ -491,24 +491,24 @@ contract StakingModule is
             }
         }
 
-        // Update aggregated state
+        // 更新聚合状态
         userStates[user].totalBoostedAmount -= boostedAmount;
         totalBoostedStaked -= boostedAmount;
 
-        // Mark stake as inactive
+        // 标记质押为非活跃
         stakeInfo.isActive = false;
 
-        // Transfer PPT back to user
+        // 将PPT返还给用户
         ppt.safeTransfer(user, amount);
 
         emit Unstaked(user, stakeIndex, amount, actualPenalty, theoreticalPenalty, isEarlyUnlock, penaltyWasCapped);
     }
 
-    /// @notice Calculate early unlock penalty
-    /// @param user User address
-    /// @param stakeInfo Stake information
-    /// @return penalty Points penalty amount
-    /// @dev penalty = earnedSinceStake * (remainingTime / lockDuration) * 50%
+    /// @notice 计算提前解锁惩罚
+    /// @param user 用户地址
+    /// @param stakeInfo 质押信息
+    /// @return penalty 积分惩罚金额
+    /// @dev penalty = earnedSinceStake × (remainingTime / lockDuration) × 50%
     function _calculateEarlyUnlockPenalty(address user, StakeInfo storage stakeInfo)
         internal
         view
@@ -517,17 +517,17 @@ contract StakingModule is
         uint256 currentPoints = userStates[user].pointsEarned;
         uint256 pointsAtStake = stakeInfo.pointsEarnedAtStake;
 
-        // Points earned since this stake
+        // 自此次质押以来赚取的积分
         uint256 earnedSinceStake = currentPoints > pointsAtStake ? currentPoints - pointsAtStake : 0;
         if (earnedSinceStake == 0) return 0;
 
-        // Calculate remaining time ratio
+        // 计算剩余时间比率
         uint256 remainingTime = stakeInfo.lockEndTime > block.timestamp ? stakeInfo.lockEndTime - block.timestamp : 0;
         if (remainingTime == 0) return 0;
 
         uint256 lockDuration = stakeInfo.lockDuration;
 
-        // penalty = earnedSinceStake * (remainingTime / lockDuration) * PENALTY_BPS / 10000
+        // penalty = earnedSinceStake × (remainingTime / lockDuration) × PENALTY_BPS / 10000
         penalty = (earnedSinceStake * remainingTime * EARLY_UNLOCK_PENALTY_BPS) / (lockDuration * 10000);
     }
 
@@ -535,19 +535,19 @@ contract StakingModule is
     // View Functions - IPointsModule Implementation
     // =============================================================================
 
-    /// @notice Get points for a user (real-time calculation)
-    /// @param user User address
-    /// @return Total accumulated points
+    /// @notice 获取用户积分（实时计算）
+    /// @param user 用户地址
+    /// @return 累积的总积分
     function getPoints(address user) external view override returns (uint256) {
         return _calculatePoints(user);
     }
 
-    /// @notice Get module name
+    /// @notice 获取模块名称
     function moduleName() external pure override returns (string memory) {
         return MODULE_NAME;
     }
 
-    /// @notice Check if module is active
+    /// @notice 检查模块是否激活
     function isActive() external view override returns (bool) {
         return active;
     }
@@ -556,16 +556,16 @@ contract StakingModule is
     // View Functions - Additional
     // =============================================================================
 
-    /// @notice Get current points per share
+    /// @notice 获取当前每份额积分
     function currentPointsPerShare() external view returns (uint256) {
         return _currentPointsPerShare();
     }
 
-    /// @notice Get user's aggregated state
-    /// @param user User address
-    /// @return totalBoostedAmount Total boosted staked amount
-    /// @return earnedPoints Total earned points
-    /// @return activeStakeCount Number of active stakes
+    /// @notice 获取用户的聚合状态
+    /// @param user 用户地址
+    /// @return totalBoostedAmount 总加成质押金额
+    /// @return earnedPoints 总赚取积分
+    /// @return activeStakeCount 活跃质押数量
     function getUserState(address user)
         external
         view
@@ -574,7 +574,7 @@ contract StakingModule is
         totalBoostedAmount = userStates[user].totalBoostedAmount;
         earnedPoints = _calculatePoints(user);
 
-        // Count active stakes
+        // 计算活跃质押数
         uint256 count = userStakeCount[user];
         for (uint256 i = 0; i < count;) {
             if (userStakes[user][i].isActive) {
@@ -586,10 +586,10 @@ contract StakingModule is
         }
     }
 
-    /// @notice Get user's stake details
-    /// @param user User address
-    /// @param stakeIndex Stake index
-    /// @return info Stake information
+    /// @notice 获取用户的质押详情
+    /// @param user 用户地址
+    /// @param stakeIndex 质押索引
+    /// @return info 质押信息
     function getStakeInfo(address user, uint256 stakeIndex) external view returns (StakeInfo memory info) {
         if (stakeIndex >= userStakeCount[user]) {
             revert StakeNotFound(stakeIndex);
@@ -597,9 +597,9 @@ contract StakingModule is
         return userStakes[user][stakeIndex];
     }
 
-    /// @notice Get all stakes for a user
-    /// @param user User address
-    /// @return stakes Array of stake information
+    /// @notice 获取用户的所有质押
+    /// @param user 用户地址
+    /// @return stakes 质押信息数组
     function getAllStakes(address user) external view returns (StakeInfo[] memory stakes) {
         uint256 count = userStakeCount[user];
         stakes = new StakeInfo[](count);
@@ -611,12 +611,12 @@ contract StakingModule is
         }
     }
 
-    /// @notice Estimate points for a staking scenario
-    /// @param amount Amount to stake (must be > 0)
-    /// @param lockDuration Lock duration (must be valid range)
-    /// @param holdDuration How long to hold the stake
-    /// @return Estimated points
-    /// @dev Reverts on invalid inputs for consistency
+    /// @notice 估算质押场景的积分
+    /// @param amount 要质押的金额（必须 > 0）
+    /// @param lockDuration 锁定期（必须在有效范围内）
+    /// @param holdDuration 持有质押的时长
+    /// @return 估算的积分
+    /// @dev 为保持一致性，无效输入会回滚
     function estimatePoints(uint256 amount, uint256 lockDuration, uint256 holdDuration)
         external
         view
@@ -630,7 +630,7 @@ contract StakingModule is
         uint256 boostedAmount = calculateBoostedAmount(amount, lockDuration);
 
         if (totalBoostedStaked == 0) {
-            // Would be only staker - gets all points
+            // 将成为唯一的质押者 - 获得所有积分
             return holdDuration * pointsRatePerSecond;
         }
 
@@ -639,10 +639,10 @@ contract StakingModule is
         return (boostedAmount * pointsGenerated) / totalWithNew;
     }
 
-    /// @notice Calculate potential early unlock penalty
-    /// @param user User address
-    /// @param stakeIndex Stake index
-    /// @return penalty Potential penalty amount
+    /// @notice 计算潜在的提前解锁惩罚
+    /// @param user 用户地址
+    /// @param stakeIndex 质押索引
+    /// @return penalty 潜在惩罚金额
     function calculatePotentialPenalty(address user, uint256 stakeIndex) external view returns (uint256 penalty) {
         if (stakeIndex >= userStakeCount[user]) {
             revert StakeNotFound(stakeIndex);
@@ -653,10 +653,10 @@ contract StakingModule is
             revert StakeNotActive(stakeIndex);
         }
 
-        // No penalty if lock has expired
+        // 如果锁定已过期则无惩罚
         if (block.timestamp >= stakeInfo.lockEndTime) return 0;
 
-        // Need to calculate current points first
+        // 需要先计算当前积分
         uint256 currentPoints = _calculatePoints(user);
         uint256 pointsAtStake = stakeInfo.pointsEarnedAtStake;
 
@@ -673,14 +673,14 @@ contract StakingModule is
     // Checkpoint Functions
     // =============================================================================
 
-    /// @notice Checkpoint global state (keeper function)
+    /// @notice 检查点全局状态（keeper函数）
     function checkpointGlobal() external onlyRole(KEEPER_ROLE) {
         _updateGlobal();
     }
 
-    /// @notice Checkpoint multiple users (keeper function)
-    /// @param users Array of user addresses to checkpoint
-    /// @dev Emits ZeroAddressSkipped for any zero addresses in the array
+    /// @notice 检查点多个用户（keeper函数）
+    /// @param users 要检查点的用户地址数组
+    /// @dev 对于数组中的任何零地址触发ZeroAddressSkipped事件
     function checkpointUsers(address[] calldata users) external onlyRole(KEEPER_ROLE) {
         uint256 len = users.length;
         if (len > MAX_BATCH_USERS) revert BatchTooLarge(len, MAX_BATCH_USERS);
@@ -699,16 +699,16 @@ contract StakingModule is
         }
     }
 
-    /// @notice Checkpoint a single user (anyone can call)
-    /// @param user User address to checkpoint
-    /// @return pointsCredited Whether points were credited
+    /// @notice 检查点单个用户（任何人都可以调用）
+    /// @param user 要检查点的用户地址
+    /// @return pointsCredited 积分是否已计入
     function checkpoint(address user) external returns (bool pointsCredited) {
         _updateGlobal();
         return _updateUser(user);
     }
 
-    /// @notice Checkpoint caller
-    /// @return pointsCredited Whether points were credited
+    /// @notice 检查点调用者
+    /// @return pointsCredited 积分是否已计入
     function checkpointSelf() external returns (bool pointsCredited) {
         _updateGlobal();
         return _updateUser(msg.sender);
@@ -718,8 +718,8 @@ contract StakingModule is
     // Admin Functions
     // =============================================================================
 
-    /// @notice Set points rate per second
-    /// @param newRate New rate (1e18 precision)
+    /// @notice 设置每秒积分率
+    /// @param newRate 新的比率（1e18精度）
     function setPointsRate(uint256 newRate) external onlyRole(ADMIN_ROLE) {
         if (newRate < MIN_POINTS_RATE || newRate > MAX_POINTS_RATE) {
             revert InvalidPointsRate(newRate, MIN_POINTS_RATE, MAX_POINTS_RATE);
@@ -733,8 +733,8 @@ contract StakingModule is
         emit PointsRateUpdated(oldRate, newRate);
     }
 
-    /// @notice Set module active status
-    /// @param _active Whether the module is active
+    /// @notice 设置模块激活状态
+    /// @param _active 模块是否激活
     function setActive(bool _active) external onlyRole(ADMIN_ROLE) {
         if (_active && !active) {
             lastUpdateTime = block.timestamp;
@@ -745,8 +745,8 @@ contract StakingModule is
         emit ModuleActiveStatusUpdated(_active);
     }
 
-    /// @notice Update PPT address (emergency only)
-    /// @param _ppt New PPT address (must be valid ERC20)
+    /// @notice 更新PPT地址（仅紧急情况）
+    /// @param _ppt 新的PPT地址（必须是有效的ERC20）
     function setPpt(address _ppt) external onlyRole(ADMIN_ROLE) {
         if (_ppt == address(0)) revert ZeroAddress();
         if (_ppt.code.length == 0) revert NotAContract(_ppt);
@@ -758,26 +758,26 @@ contract StakingModule is
         emit PptUpdated(oldPpt, _ppt);
     }
 
-    /// @notice Set minimum holding blocks for flash loan protection
-    /// @param blocks Minimum blocks
+    /// @notice 设置闪电贷保护的最少持有区块数
+    /// @param blocks 最少区块数
     function setMinHoldingBlocks(uint256 blocks) external onlyRole(ADMIN_ROLE) {
         uint256 oldBlocks = minHoldingBlocks;
         minHoldingBlocks = blocks;
         emit MinHoldingBlocksUpdated(oldBlocks, blocks);
     }
 
-    /// @notice Pause contract operations
+    /// @notice 暂停合约操作
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
-    /// @notice Unpause contract operations
+    /// @notice 取消暂停合约操作
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
 
-    /// @notice Get contract version
-    /// @return Version string
+    /// @notice 获取合约版本
+    /// @return 版本字符串
     function version() external pure returns (string memory) {
         return VERSION;
     }
@@ -786,6 +786,6 @@ contract StakingModule is
     // Storage Gap - Reserved for future upgrades
     // =============================================================================
 
-    /// @dev Reserved storage space to allow for layout changes in future upgrades
+    /// @dev 预留存储空间，以便在未来升级中允许布局更改
     uint256[50] private __gap;
 }

@@ -2,57 +2,57 @@
 pragma solidity ^0.8.24;
 
 /// @title IPointsModule
-/// @notice Interface for points modules that can be registered with PointsHub
-/// @dev All points modules must implement this interface
+/// @notice 可以注册到 PointsHub 的积分模块接口
+/// @dev 所有积分模块都必须实现此接口
 interface IPointsModule {
-    /// @notice Get the points earned by a user in this module
-    /// @param user The address of the user
-    /// @return The total points earned by the user
+    /// @notice 获取用户在此模块中获得的积分
+    /// @param user 用户地址
+    /// @return 用户获得的总积分
     function getPoints(address user) external view returns (uint256);
 
-    /// @notice Get the name of this module
-    /// @return The module name as a string
+    /// @notice 获取此模块的名称
+    /// @return 模块名称字符串
     function moduleName() external view returns (string memory);
 
-    /// @notice Check if this module is currently active
-    /// @return True if the module is active, false otherwise
+    /// @notice 检查此模块当前是否处于活跃状态
+    /// @return 如果模块处于活跃状态返回 true，否则返回 false
     function isActive() external view returns (bool);
 }
 
 /// @title IPenaltyModule
-/// @notice Interface for penalty module that tracks redemption penalties
+/// @notice 追踪兑换惩罚的惩罚模块接口
 interface IPenaltyModule {
-    /// @notice Get the penalty points for a user
-    /// @param user The address of the user
-    /// @return The total penalty points for the user
+    /// @notice 获取用户的惩罚积分
+    /// @param user 用户地址
+    /// @return 用户的总惩罚积分
     function getPenalty(address user) external view returns (uint256);
 }
 
 /// @title IPointsHub
-/// @notice Interface for the central points aggregation hub
+/// @notice 中央积分聚合中心接口
 interface IPointsHub {
-    /// @notice Get total points across all modules for a user
-    /// @param user The address of the user
-    /// @return Total points from all active modules
+    /// @notice 获取用户在所有模块中的总积分
+    /// @param user 用户地址
+    /// @return 所有活跃模块的总积分
     function getTotalPoints(address user) external view returns (uint256);
 
-    /// @notice Get penalty points for a user
-    /// @param user The address of the user
-    /// @return Penalty points
+    /// @notice 获取用户的惩罚积分
+    /// @param user 用户地址
+    /// @return 惩罚积分
     function getPenaltyPoints(address user) external view returns (uint256);
 
-    /// @notice Get claimable points after deducting penalties and redeemed amounts
-    /// @param user The address of the user
-    /// @return Claimable points
+    /// @notice 获取扣除惩罚和已兑换数量后的可领取积分
+    /// @param user 用户地址
+    /// @return 可领取积分
     function getClaimablePoints(address user) external view returns (uint256);
 
-    /// @notice Redeem points for reward tokens
-    /// @param pointsAmount Amount of points to redeem
+    /// @notice 兑换积分为奖励代币
+    /// @param pointsAmount 要兑换的积分数量
     function redeem(uint256 pointsAmount) external;
 }
 
 /// @title IPPT
-/// @notice Interface for PPT Vault (minimal interface needed by points system)
+/// @notice PPT Vault 接口（积分系统所需的最小接口）
 interface IPPT {
     function balanceOf(address account) external view returns (uint256);
     function effectiveSupply() external view returns (uint256);
