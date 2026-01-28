@@ -408,6 +408,7 @@ contract StakingModule is
 
         address user = msg.sender;
         uint256 currentCount = userStakeCount[user];
+        //@todo: 其实不需要限制用户质押次数
         if (currentCount >= MAX_STAKES_PER_USER) {
             revert MaxStakesReached(currentCount, MAX_STAKES_PER_USER);
         }
@@ -440,6 +441,11 @@ contract StakingModule is
             lockDuration: uint56(lockDuration),
             isActive: true
         });
+
+        // 修复：如果是新用户，初始化 pointsPerSharePaid
+        if (userStates[user].totalBoostedAmount == 0) {
+            userStates[user].pointsPerSharePaid = pointsPerShareStored;
+        }
 
         // 更新聚合状态
         userStates[user].totalBoostedAmount += boostedAmount;
