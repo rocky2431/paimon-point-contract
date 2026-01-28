@@ -12,8 +12,21 @@ forge test --match-path test/StakingModule.t.sol  # Specific test file
 forge test --match-test testStake        # Specific test function
 forge test --gas-report                  # Gas report
 forge test --profile ci                  # CI profile (1000 fuzz runs)
+forge coverage                           # Test coverage report
 forge fmt                                # Format code
 forge fmt --check                        # Check formatting
+```
+
+### Deployment
+
+```bash
+# Deploy StakingModule (requires env vars: PPT_ADDRESS, ADMIN_ADDRESS, KEEPER_ADDRESS, UPGRADER_ADDRESS)
+forge script script/DeployStakingModule.s.sol:DeployStakingModule \
+  --rpc-url $RPC_URL --broadcast --verify -vvvv
+
+# Testnet deployment
+forge script script/DeployStakingModule.s.sol:DeployStakingModuleTestnet \
+  --rpc-url $BSC_TESTNET_RPC --broadcast -vvvv
 ```
 
 ## Architecture Overview
@@ -65,6 +78,18 @@ StakingModule, LPModule 使用检查点系统防止闪电贷攻击：
 | KEEPER_ROLE | Checkpoint、Merkle root 更新 |
 | UPGRADER_ROLE | UUPS 升级 (建议配合 Timelock) |
 
+### Critical Constants
+
+| Contract | Constant | Value | Impact |
+|----------|----------|-------|--------|
+| StakingModule | `EARLY_UNLOCK_PENALTY_BPS` | 5000 (50%) | 提前解锁罚金比例 |
+| StakingModule | `MIN_LOCK_DURATION` | 7 days | 最短锁定期 |
+| StakingModule | `MAX_LOCK_DURATION` | 365 days | 最长锁定期 |
+| StakingModule | `MAX_STAKES_PER_USER` | 100 | 每用户最大质押数 |
+| Activity/Penalty | `ROOT_DELAY` | 24 hours | Merkle root 生效延迟 |
+| PointsHub | `MAX_MODULES` | 10 | 最大可注册模块数 |
+| LPModule | `MAX_POOLS` | 20 | 最大 LP 池数 |
+
 ## Key Patterns
 
 ### UUPS Upgradeable
@@ -100,8 +125,27 @@ Admin 可通过 `emergencyActivateRoot()` 跳过延迟。
 ## Test Infrastructure
 
 - **BaseTest** (`test/Base.t.sol`): 部署所有模块和 mocks，提供 helper functions
-- **Mocks**: `MockPPT`, `MockERC20`, `MockStakingPPT`
-- **Helpers**: `_generateMerkleProof()`, `_advanceTime()`, `_advanceBlocks()`, `_setActivityMerkleRoot()`
+- **Mocks**: `MockPPT`, `MockERC20` (位于 `test/mocks/`)
+
+### Test Helpers (from BaseTest)
+
+| Helper | Usage |
+|--------|-------|
+| `_generateMerkleProof(user, amount, allUsers, allAmounts)` | 生成 Merkle proof (支持 1-4 用户) |
+| `_advanceTime(seconds_)` | `vm.warp(block.timestamp + seconds_)` |
+| `_advanceBlocks(blocks_)` | `vm.roll(block.number + blocks_)` |
+| `_setActivityMerkleRoot(root, label)` | 设置 ActivityModule root (含 24h 等待) |
+| `_setPenaltyMerkleRoot(root)` | 设置 PenaltyModule root (含 24h 等待) |
+
+### Default Test Constants
+
+```solidity
+PRECISION = 1e18
+POINTS_RATE_PER_SECOND = 1  // 每 PPT 每秒 1 积分
+LP_BASE_RATE = 1            // 每 LP 每秒 1 积分
+EXCHANGE_RATE = 1e18        // 1:1 兑换
+PENALTY_RATE_BPS = 1000     // 10% 惩罚率
+```
 
 ## Dependencies
 
@@ -109,6 +153,19 @@ Git submodules (`git submodule update --init --recursive`):
 - OpenZeppelin Contracts v5.0.2
 - OpenZeppelin Contracts Upgradeable v5.0.2
 - Forge Std
+
+## Environment Variables
+
+Deployment scripts require:
+
+| Variable | Description |
+|----------|-------------|
+| `PPT_ADDRESS` | PPT token 合约地址 |
+| `ADMIN_ADDRESS` | Admin 多签地址 |
+| `KEEPER_ADDRESS` | Keeper 地址 (运维账户) |
+| `UPGRADER_ADDRESS` | Upgrader 地址 (建议 Timelock) |
+| `POINTS_HUB_ADDRESS` | (Optional) PointsHub 地址 |
+| `POINTS_RATE_PER_SECOND` | (Optional) 积分率，默认 1e15 |
 
 ## Configuration
 

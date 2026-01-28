@@ -369,8 +369,8 @@ penalty = currentPoints × (remainingTime / lockDuration) × 50%
 
 ```solidity
 event Staked(address indexed user, uint256 indexed stakeIndex, uint256 amount, StakeType stakeType, uint256 lockDurationDays, uint256 boost, uint256 lockEndTime);
-event Unstaked(address indexed user, uint256 indexed stakeIndex, uint256 amount, uint256 actualPenalty, uint256 cappedPenalty, bool isEarlyUnlock, bool penaltyWasCapped);
-event UserCheckpointed(address indexed user, uint256 pointsEarned, uint256 totalStakedAmount, uint256 timestamp);
+event Unstaked(address indexed user, uint256 indexed stakeIndex, uint256 amount, uint256 actualPenalty, uint256 theoreticalPenalty, bool isEarlyUnlock, bool penaltyWasCapped);
+event UserCheckpointed(address indexed user, uint256 totalPoints, uint256 totalStaked, uint256 timestamp);
 event FlashLoanProtectionTriggered(address indexed user, uint256 blocksRemaining);
 event ZeroAddressSkipped(uint256 indexed position);
 event PointsRateUpdated(uint256 oldRate, uint256 newRate);
@@ -424,17 +424,12 @@ struct PoolConfig {
     string name;         // 池名称
 }
 
-struct PoolState {
-    uint256 lastUpdateTime;    // 上次更新时间
-    uint256 pointsPerLpStored; // 累积每 LP 积分
-}
-
+/// @notice v2.0 信用卡模式 - 无全局 PoolState，每用户独立计算
 struct UserPoolState {
-    uint256 pointsPerLpPaid;    // 用户上次记录的每 LP 积分
-    uint256 pointsEarned;       // 用户累积积分
-    uint256 lastBalance;        // 用户上次记录余额
-    uint256 lastCheckpoint;     // 上次 checkpoint 时间
-    uint256 lastCheckpointBlock; // 上次 checkpoint 区块
+    uint256 accruedPoints;       // 已累计积分
+    uint256 lastBalance;         // 上次检查点时的 LP 余额
+    uint256 lastAccrualTime;     // 上次积分累计时间
+    uint256 lastCheckpointBlock; // 用于闪电贷保护
 }
 ```
 
@@ -484,7 +479,7 @@ function getUserPoolState(address user, uint256 poolId) external view returns (
     uint256 balance,
     uint256 lastCheckpointBalance,
     uint256 earnedPoints,
-    uint256 lastCheckpointTime,
+    uint256 lastAccrualTime,
     uint256 lastCheckpointBlock
 )
 
