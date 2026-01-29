@@ -81,8 +81,8 @@ contract StakingModuleTest is Test {
         assertTrue(stakingModule.active());
         assertEq(stakingModule.minHoldingBlocks(), 1);
         assertEq(stakingModule.moduleName(), "PPT Staking");
-        assertEq(stakingModule.VERSION(), "2.0.0");
-        assertEq(stakingModule.version(), "2.0.0");
+        assertEq(stakingModule.VERSION(), "2.1.0");
+        assertEq(stakingModule.version(), "2.1.0");
     }
 
     function test_initialization_zeroAddress_ppt_reverts() public {

@@ -11,12 +11,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {IPointsModule} from "./interfaces/IPointsModule.sol";
 
-/// @title 质押模块 v2.0 - 信用卡积分模式
+/// @title 质押模块 v2.1 - 信用卡积分模式（优化版）
 /// @author Paimon Protocol
 /// @notice 带时间锁定加成的PPT质押积分模块
 /// @dev 使用"信用卡积分"模式：积分 = 质押金额 × boost × pointsRate × 时长
 ///      每个用户的积分只与自己的行为相关，后入者不会被稀释
 ///      支持灵活质押（随时取出，1.0x boost）和锁定质押（7-365天，1.02x-2.0x boost）
+///      v2.1 优化：unstake 时清理质押记录，减少遍历成本和存储占用
 contract StakingModule is
     IPointsModule,
     Initializable,
@@ -44,7 +45,7 @@ contract StakingModule is
     uint256 public constant MAX_STAKES_PER_USER = 100;
 
     string public constant MODULE_NAME = "PPT Staking";
-    string public constant VERSION = "2.0.0";
+    string public constant VERSION = "2.1.0";
 
     uint256 public constant MAX_BATCH_USERS = 100;
 
@@ -115,6 +116,10 @@ contract StakingModule is
     /// @notice 积分计入前所需的最少区块数（闪电贷保护）
     uint256 public minHoldingBlocks;
 
+    /// @notice 用户已累计的历史积分（来自已赎回的质押）
+    /// @dev 优化：避免遍历已赎回的质押记录
+    mapping(address => uint256) public userAccruedHistoricalPoints;
+
     // =============================================================================
     // Events
     // =============================================================================
@@ -153,6 +158,9 @@ contract StakingModule is
     event StakingModuleUpgraded(address indexed newImplementation, uint256 timestamp);
     event MinHoldingBlocksUpdated(uint256 oldBlocks, uint256 newBlocks);
     event PptUpdated(address indexed oldPpt, address indexed newPpt);
+
+    /// @notice 当质押记录被删除（优化存储）时触发
+    event StakeRecordDeleted(address indexed user, uint256 indexed stakeIndex, uint256 accruedPoints);
 
     // =============================================================================
     // Errors
@@ -428,13 +436,18 @@ contract StakingModule is
         // 更新聚合状态
         userStates[user].totalStakedAmount -= amount;
 
-        // 标记质押为非活跃
-        stakeInfo.isActive = false;
+        // 🔥 优化：累加积分到历史总积分，然后删除质押记录
+        uint256 finalAccruedPoints = stakeInfo.accruedPoints;
+        userAccruedHistoricalPoints[user] += finalAccruedPoints;
+
+        // 删除质押记录（释放存储空间，可获得 gas refund）
+        delete userStakes[user][stakeIndex];
 
         // 将PPT返还给用户
         ppt.safeTransfer(user, amount);
 
         emit Unstaked(user, stakeIndex, amount, actualPenalty, theoreticalPenalty, isEarlyUnlock, penaltyWasCapped);
+        emit StakeRecordDeleted(user, stakeIndex, finalAccruedPoints);
     }
 
     /// @notice 计算提前解锁惩罚
@@ -465,18 +478,20 @@ contract StakingModule is
         return _calculateUserTotalPoints(user);
     }
 
-    /// @notice 计算用户所有质押的总积分（包括已 unstake 的）
-    /// @dev inactive stakes 只计算已累计的 accruedPoints，不再增长
+    /// @notice 计算用户所有质押的总积分
+    /// @dev 🔥 优化：只遍历活跃的质押，已赎回的积分从 userAccruedHistoricalPoints 读取
     function _calculateUserTotalPoints(address user) internal view returns (uint256 total) {
+        // 1. 加上已赎回质押的历史积分
+        total = userAccruedHistoricalPoints[user];
+
+        // 2. 只遍历活跃的质押（跳过已删除的记录）
         uint256 count = userStakeCount[user];
         for (uint256 i = 0; i < count;) {
             StakeInfo storage stake = userStakes[user][i];
-            if (stake.isActive) {
+            // 跳过已删除的质押记录（amount 被 delete 后为 0）
+            if (stake.amount > 0 && stake.isActive) {
                 // 活跃质押：累计积分 + 待累计积分
                 total += _calculateStakeTotalPoints(stake);
-            } else {
-                // 非活跃质押：只计算已累计的积分（不再增长）
-                total += stake.accruedPoints;
             }
             unchecked {
                 ++i;
@@ -511,10 +526,12 @@ contract StakingModule is
         totalStakedAmount = userStates[user].totalStakedAmount;
         earnedPoints = _calculateUserTotalPoints(user);
 
-        // 计算活跃质押数
+        // 计算活跃质押数（跳过已删除的记录）
         uint256 count = userStakeCount[user];
         for (uint256 i = 0; i < count;) {
-            if (userStakes[user][i].isActive) {
+            StakeInfo storage stake = userStakes[user][i];
+            // 只统计未被删除且活跃的质押
+            if (stake.amount > 0 && stake.isActive) {
                 ++activeStakeCount;
             }
             unchecked {
@@ -748,5 +765,6 @@ contract StakingModule is
     // =============================================================================
 
     /// @dev 预留存储空间，以便在未来升级中允许布局更改
-    uint256[50] private __gap;
+    /// @dev v2.1: 减少1个槽位（添加了 userAccruedHistoricalPoints）
+    uint256[49] private __gap;
 }
