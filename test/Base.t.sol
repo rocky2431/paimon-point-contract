@@ -37,9 +37,9 @@ abstract contract BaseTest is Test {
 
     // Constants
     uint256 public constant PRECISION = 1e18;
-    uint256 public constant POINTS_RATE_PER_SECOND = 1; // 1 point per second per PPT (minimal rate)
+    uint256 public constant POINTS_RATE_PER_SECOND = 1e18; // 1.0x rate (RATE_PRECISION base)
     uint256 public constant LP_BASE_RATE = 1; // 1 point per second per LP (minimal rate)
-    uint256 public constant STAKING_RATE = 1; // 1 point per second per staked PPT (minimal rate)
+    uint256 public constant STAKING_RATE = 1e18; // 1.0x rate (RATE_PRECISION base)
     uint256 public constant EXCHANGE_RATE = 1e18; // 1:1
     uint256 public constant PENALTY_RATE_BPS = 1000; // 10%
 

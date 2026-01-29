@@ -39,6 +39,7 @@ contract StakingModule is
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
 
     uint256 public constant PRECISION = 1e18;
+    uint256 public constant RATE_PRECISION = 1e18; // pointsRatePerSecond 精度基准，rate=1e18 表示 1.0x
     uint256 public constant BOOST_BASE = 10000; // 1倍 = 10000, 2倍 = 20000
     uint256 public constant MAX_EXTRA_BOOST = 10000; // 最大额外加成1倍（总共2倍）
     uint256 public constant MIN_LOCK_DURATION = 7 days;
@@ -297,7 +298,7 @@ contract StakingModule is
     // =============================================================================
 
     /// @notice 计算单个质押从上次累计到现在的积分
-    /// @dev 信用卡模式：积分 = amount × effectiveBoost × pointsRatePerSecond × duration / BOOST_BASE
+    /// @dev 信用卡模式：积分 = amount × effectiveBoost × pointsRatePerSecond × duration / (BOOST_BASE × RATE_PRECISION)
     /// @param stake 质押信息
     /// @return 新增积分
     function _calculateStakePointsSinceLastAccrual(StakeInfo storage stake) internal view returns (uint256) {
@@ -308,8 +309,8 @@ contract StakingModule is
 
         uint256 effectiveBoost = _getEffectiveBoost(stake);
 
-        // 积分 = amount × effectiveBoost × pointsRatePerSecond × duration / BOOST_BASE
-        return (uint256(stake.amount) * effectiveBoost * pointsRatePerSecond * duration) / BOOST_BASE;
+        // 积分 = amount × effectiveBoost × pointsRatePerSecond × duration / (BOOST_BASE × RATE_PRECISION)
+        return (uint256(stake.amount) * effectiveBoost * pointsRatePerSecond * duration) / (BOOST_BASE * RATE_PRECISION);
     }
 
     /// @notice 计算单个质押的总积分（包括已累计 + 待累计）
@@ -652,8 +653,8 @@ contract StakingModule is
         if (amount == 0) revert ZeroAmount();
 
         uint256 boost = calculateBoostFromDays(lockDurationDays);
-        // 积分 = amount × boost × pointsRatePerSecond × duration / BOOST_BASE
-        return (amount * boost * pointsRatePerSecond * holdDurationSeconds) / BOOST_BASE;
+        // 积分 = amount × boost × pointsRatePerSecond × duration / (BOOST_BASE × RATE_PRECISION)
+        return (amount * boost * pointsRatePerSecond * holdDurationSeconds) / (BOOST_BASE * RATE_PRECISION);
     }
 
     /// @notice 计算潜在的提前解锁惩罚

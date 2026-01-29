@@ -43,6 +43,11 @@ contract PointsHub is
     /// @notice 最小兑换率（防止粉尘数量）
     uint256 public constant MIN_EXCHANGE_RATE = 1e12;
 
+    /// @notice 积分显示精度（类似 ERC20 decimals）
+    /// @dev 前端显示时: displayPoints = rawPoints / 10^POINTS_DECIMALS
+    /// 例: rawPoints = 8.64e24 → displayPoints = 8.64
+    uint8 public constant POINTS_DECIMALS = 24;
+
     /// @notice 用于跟踪升级的合约版本
     string public constant VERSION = "1.3.0";
 

@@ -221,31 +221,15 @@ contract StakingModuleTest is Test {
         _advanceTime(1 days);
 
         uint256 points = stakingModule.getPoints(user1);
-        // Credit card mode: points = amount * boost(1.0x) * rate * duration / BOOST_BASE
-        // = 1000e18 * 10000 * 1e15 * 86400 / 10000 = 86400e33 / 10000 = 86400e29 ???
-        // Wait, let me recalculate:
-        // points = amount * boost * rate * duration / BOOST_BASE
-        // = 1000e18 * 10000 * 1e15 * 86400 / 10000
-        // = 1000e18 * 1e15 * 86400
-        // = 86400 * 1000 * 1e33
-        // That's way too big. Let me check the formula again.
-
-        // Looking at the code:
-        // return (uint256(stake.amount) * effectiveBoost * pointsRatePerSecond * duration) / BOOST_BASE;
-        // = (1000e18 * 10000 * 1e15 * 86400) / 10000
-        // = 1000e18 * 1e15 * 86400
-        // = 86400e33
-
-        // That seems wrong. Let me check what the expected value should be.
-        // If rate = 1e15 per second per PPT, and amount = 1000e18 PPT
-        // Then for 1 day with 1.0x boost:
-        // points = 1000e18 * 1.0 * 1e15 * 86400 = 86.4e36
-
-        // Hmm, this is getting very large. Let me just test relative values.
+        // Credit card mode: points = amount * boost(1.0x) * rate * duration / (BOOST_BASE * RATE_PRECISION)
+        // = 1000e18 * 10000 * 1e15 * 86400 / (10000 * 1e18)
+        // = 1000e18 * 1e15 * 86400 / 1e18
+        // = 1000 * 1e15 * 86400
+        // = 86400e18
         assertTrue(points > 0, "Should have earned points");
 
         // Verify the calculation
-        uint256 expected = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * 1 days) / BOOST_BASE;
+        uint256 expected = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * 1 days) / (BOOST_BASE * PRECISION);
         assertEq(points, expected, "Points should match expected");
     }
 
@@ -368,7 +352,7 @@ contract StakingModuleTest is Test {
 
         // User1: 2 days of points
         // User2: 1 day of points
-        uint256 expectedPerDay = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * 1 days) / BOOST_BASE;
+        uint256 expectedPerDay = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * 1 days) / (BOOST_BASE * PRECISION);
         assertEq(points1, expectedPerDay * 2, "User1 should have 2 days of points");
         assertEq(points2, expectedPerDay, "User2 should have 1 day of points");
 
@@ -559,9 +543,9 @@ contract StakingModuleTest is Test {
 
         uint256 points = stakingModule.getPoints(user1);
 
-        // Expected: amount * boost(2.0x) * rate * duration / BOOST_BASE
+        // Expected: amount * boost(2.0x) * rate * duration / (BOOST_BASE * RATE_PRECISION)
         uint256 boost = stakingModule.calculateBoostFromDays(365);
-        uint256 expected = (amount * boost * POINTS_RATE_PER_SECOND * 1 days) / BOOST_BASE;
+        uint256 expected = (amount * boost * POINTS_RATE_PER_SECOND * 1 days) / (BOOST_BASE * PRECISION);
         assertEq(points, expected);
     }
 
@@ -826,7 +810,7 @@ contract StakingModuleTest is Test {
 
         // Credit card mode: fixed rate regardless of other stakers
         uint256 boost = stakingModule.calculateBoostFromDays(lockDays);
-        uint256 expected = (amount * boost * POINTS_RATE_PER_SECOND * holdDuration) / BOOST_BASE;
+        uint256 expected = (amount * boost * POINTS_RATE_PER_SECOND * holdDuration) / (BOOST_BASE * PRECISION);
         assertEq(estimated, expected);
     }
 
@@ -956,8 +940,8 @@ contract StakingModuleTest is Test {
 
         uint256 points = stakingModule.getPoints(user1);
 
-        // Points should be exactly: amount * 1.0x * rate * duration / BOOST_BASE
-        uint256 expected = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * duration) / BOOST_BASE;
+        // Points should be exactly: amount * 1.0x * rate * duration / (BOOST_BASE * RATE_PRECISION)
+        uint256 expected = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * duration) / (BOOST_BASE * PRECISION);
         assertEq(points, expected);
     }
 

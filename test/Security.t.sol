@@ -69,7 +69,7 @@ contract SecurityTest is BaseTest {
         stakingModule.upgradeToAndCall(address(newImpl), "");
 
         // Verify upgrade succeeded by checking version is still accessible
-        assertEq(stakingModule.VERSION(), "2.0.0");
+        assertEq(stakingModule.VERSION(), "2.3.0");
     }
 
     // ============================================
