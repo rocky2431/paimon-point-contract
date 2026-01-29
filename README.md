@@ -1,8 +1,10 @@
-# Paimon Points System v2.0.0
+# Paimon Points System v2.3.0
 
 链上模块化积分系统，采用**信用卡积分模式**，支持多种积分获取方式和统一兑换机制。
 
 > **v2.0.0 重大变更**: 从 Synthetix 风格的"瓜分池子"模式迁移到"信用卡积分"模式，确保后入者与早入者在同等条件下获得同等积分，无稀释效应。
+>
+> **v2.3.0 变更**: 新增 `RATE_PRECISION` 精度基准，`pointsRatePerSecond` 支持小数倍率（如 0.9x = `9e17`）；新增 `POINTS_DECIMALS = 24` 前端显示精度常量。
 
 ## 目录
 
@@ -27,7 +29,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         PointsHub v2.0.0                            │
+│                         PointsHub v1.3.0                            │
 │                    (中央聚合器 + 兑换引擎)                            │
 │                                                                     │
 │  公式: claimablePoints = Σ modules.getPoints(user)                  │
@@ -67,8 +69,67 @@ v2.0.0 采用**信用卡积分模式**，与传统 Synthetix-style 的"瓜分池
 
 **核心公式:**
 ```
-StakingModule: points = amount × boost × pointsRatePerSecond × duration / BOOST_BASE
+StakingModule: points = amount × boost × pointsRatePerSecond × duration / (BOOST_BASE × RATE_PRECISION)
 LPModule:      points = balance × (baseRate × multiplier / MULTIPLIER_BASE) × duration
+```
+
+### 积分精度与前端显示
+
+链上积分值继承了 ERC20 代币的 18 位精度，加上时间和倍率的乘积，原始值非常大。
+系统采用 **ERC20 decimals 模式** 来解决显示问题：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  链上 (Raw Value)           前端 (Display Value)              │
+│                                                              │
+│  getPoints(user)            rawPoints / 10^POINTS_DECIMALS   │
+│  = 8,640,000,000,...        = 8.64                           │
+│    (8.64e24)                                                 │
+│                                                              │
+│  POINTS_DECIMALS = 24  ← PointsHub 链上常量                   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**前端集成示例:**
+```javascript
+const decimals = await pointsHub.POINTS_DECIMALS(); // 24
+const rawPoints = await pointsHub.getTotalPoints(userAddress);
+const displayPoints = formatUnits(rawPoints, decimals); // "8.64"
+```
+
+**各场景积分参考** (rate = 1e18, 即 1.0x):
+
+| 场景 | Raw Value | Display Value |
+|------|-----------|---------------|
+| 100 PPT × 灵活 × 1 天 | `8.64e24` | **8.64** |
+| 1000 PPT × 灵活 × 1 天 | `8.64e25` | **86.4** |
+| 1000 PPT × 2.0x boost × 365 天 | `6.31e28` | **63,072** |
+| 100 PPT × 0.9x rate × 1 天 | `7.776e24` | **7.776** |
+
+### pointsRatePerSecond 精度机制
+
+`pointsRatePerSecond` 使用 `RATE_PRECISION = 1e18` 作为精度基准：
+
+```
+RATE_PRECISION = 1e18
+
+rate = 1e18   → 1.0x（标准速率）
+rate = 9e17   → 0.9x（降低 10%）
+rate = 5e17   → 0.5x（降低 50%）
+rate = 15e17  → 1.5x（提高 50%）
+rate = 2e18   → 2.0x（双倍速率）
+```
+
+**为什么需要 RATE_PRECISION?**
+
+Solidity 没有浮点数，`0.9` 会被截断为 `0`。通过放大到 `9e17` 并在公式中除以 `1e18`，实现了无损的小数倍率：
+
+```solidity
+// 公式
+points = (amount × boost × pointsRatePerSecond × duration) / (BOOST_BASE × RATE_PRECISION)
+
+// 当 rate = 1e18 时，RATE_PRECISION 抵消，等价于旧版公式：
+// points = amount × boost × duration / BOOST_BASE
 ```
 
 ---
@@ -77,8 +138,8 @@ LPModule:      points = balance × (baseRate × multiplier / MULTIPLIER_BASE) ×
 
 | 合约 | 文件 | 版本 | 描述 |
 |------|------|------|------|
-| PointsHub | `src/PointsHub.sol` | 1.3.0 | 中央聚合器，积分兑换 |
-| StakingModule | `src/StakingModule.sol` | 2.0.0 | PPT 灵活/锁定质押 (信用卡模式) |
+| PointsHub | `src/PointsHub.sol` | 1.3.0 | 中央聚合器，积分兑换，`POINTS_DECIMALS` |
+| StakingModule | `src/StakingModule.sol` | 2.3.0 | PPT 灵活/锁定质押 (信用卡模式 + RATE_PRECISION) |
 | LPModule | `src/LPModule.sol` | 2.0.0 | LP Token 多池质押 (信用卡模式) |
 | ActivityModule | `src/ActivityModule.sol` | 1.3.0 | 链下活动积分 (Merkle) |
 | PenaltyModule | `src/PenaltyModule.sol` | 1.3.0 | 惩罚扣除 (Merkle) |
@@ -98,6 +159,7 @@ LPModule:      points = balance × (baseRate × multiplier / MULTIPLIER_BASE) ×
 | 常量 | 值 | 描述 |
 |------|-----|------|
 | `PRECISION` | `1e18` | 计算精度 |
+| `POINTS_DECIMALS` | `24` | 积分显示精度（类似 ERC20 decimals，前端 `÷ 10^24` 显示） |
 | `MAX_MODULES` | `10` | 最大模块数 |
 | `DEFAULT_MODULE_GAS_LIMIT` | `200,000` | 模块调用 Gas 限制 |
 | `MAX_EXCHANGE_RATE` | `1e24` | 最大兑换率 |
@@ -235,6 +297,7 @@ PPT 质押积分模块，支持**灵活质押**和**锁定质押**两种模式�
 | 常量 | 值 | 描述 |
 |------|-----|------|
 | `PRECISION` | `1e18` | 计算精度 |
+| `RATE_PRECISION` | `1e18` | `pointsRatePerSecond` 精度基准（`1e18` = 1.0x） |
 | `BOOST_BASE` | `10000` | Boost 基数 (1x = 10000) |
 | `MAX_EXTRA_BOOST` | `10000` | 最大额外 Boost (1x) |
 | `MIN_LOCK_DURATION` | `7 days` | 最小锁定期 |
@@ -242,7 +305,8 @@ PPT 质押积分模块，支持**灵活质押**和**锁定质押**两种模式�
 | `EARLY_UNLOCK_PENALTY_BPS` | `5000` | 提前解锁惩罚 (50%) |
 | `MAX_STAKES_PER_USER` | `100` | 每用户最大质押数 |
 | `MAX_BATCH_USERS` | `100` | 批量 checkpoint 最大用户数 |
-| `MAX_STAKE_AMOUNT` | `type(uint128).max / 2` | 单笔最大质押量 |
+| `MIN_STAKE_AMOUNT` | `100e18` | 最小质押量 (100 PPT) |
+| `MAX_STAKE_AMOUNT` | `type(uint128).max / 2` | 最大质押量（防止积分计算乘法溢出） |
 | `MIN_POINTS_RATE` | `1` | 最小积分率 |
 | `MAX_POINTS_RATE` | `1e24` | 最大积分率 |
 
@@ -291,10 +355,35 @@ struct UserState {
 
 ```
 // 每个质押独立计算，无全局状态
-points = amount × boost × pointsRatePerSecond × duration / BOOST_BASE
+points = amount × boost × pointsRatePerSecond × duration / (BOOST_BASE × RATE_PRECISION)
 
 // boost 根据质押类型和锁定状态动态计算
 effectiveBoost = isLocked && notExpired ? calculateBoost(lockDuration) : BOOST_BASE
+
+// RATE_PRECISION = 1e18，rate = 1e18 时公式退化为：
+// points = amount × boost × duration / BOOST_BASE
+```
+
+**计算示例** (rate = 1e18, 即 1.0x):
+
+```
+100 PPT 灵活质押 1 天:
+= 100e18 × 10000 × 1e18 × 86400 / (10000 × 1e18)
+= 100e18 × 86400
+= 8.64e24 (raw)
+= 8.64 (display, ÷ 10^24)
+
+1000 PPT 锁定 365 天 (2.0x boost) 质押 1 天:
+= 1000e18 × 20000 × 1e18 × 86400 / (10000 × 1e18)
+= 1000e18 × 2 × 86400
+= 1.728e26 (raw)
+= 172.8 (display)
+
+100 PPT 灵活质押 1 天, rate = 0.9x (9e17):
+= 100e18 × 10000 × 9e17 × 86400 / (10000 × 1e18)
+= 100e18 × 0.9 × 86400
+= 7.776e24 (raw)
+= 7.776 (display)
 ```
 
 ### 核心函数
