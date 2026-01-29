@@ -24,17 +24,16 @@ contract StakingModuleTest is Test {
 
     uint256 public constant PRECISION = 1e18;
     uint256 public constant BOOST_BASE = 10000;
-    uint256 public constant POINTS_RATE_PER_SECOND = 1e15; // 0.001 points per second per PPT
 
     function setUp() public {
         // Deploy mocks
         ppt = new MockStakingPPT();
         rewardToken = new MockERC20("Reward Token", "RWD", 18);
 
-        // Deploy and initialize StakingModule
+        // Deploy and initialize StakingModule (v3.0: 移除 pointsRatePerSecond)
         StakingModule impl = new StakingModule();
         bytes memory initData = abi.encodeWithSelector(
-            StakingModule.initialize.selector, address(ppt), admin, keeper, upgrader, POINTS_RATE_PER_SECOND
+            StakingModule.initialize.selector, address(ppt), admin, keeper, upgrader
         );
         stakingModule = StakingModule(address(new ERC1967Proxy(address(impl), initData)));
 
@@ -77,12 +76,11 @@ contract StakingModuleTest is Test {
 
     function test_initialization() public view {
         assertEq(address(stakingModule.ppt()), address(ppt));
-        assertEq(stakingModule.pointsRatePerSecond(), POINTS_RATE_PER_SECOND);
         assertTrue(stakingModule.active());
         assertEq(stakingModule.minHoldingBlocks(), 1);
         assertEq(stakingModule.moduleName(), "PPT Staking");
-        assertEq(stakingModule.VERSION(), "2.1.0");
-        assertEq(stakingModule.version(), "2.1.0");
+        assertEq(stakingModule.VERSION(), "3.0.0");
+        assertEq(stakingModule.version(), "3.0.0");
     }
 
     function test_initialization_zeroAddress_ppt_reverts() public {
@@ -96,8 +94,7 @@ contract StakingModuleTest is Test {
                 address(0), // zero PPT
                 admin,
                 keeper,
-                upgrader,
-                POINTS_RATE_PER_SECOND
+                upgrader
             )
         );
     }
@@ -113,30 +110,13 @@ contract StakingModuleTest is Test {
                 address(ppt),
                 address(0), // zero admin
                 keeper,
-                upgrader,
-                POINTS_RATE_PER_SECOND
+                upgrader
             )
         );
     }
 
-    function test_initialization_invalidPointsRate_tooLow_reverts() public {
-        StakingModule impl = new StakingModule();
-        uint256 minRate = impl.MIN_POINTS_RATE();
-        uint256 maxRate = impl.MAX_POINTS_RATE();
-
-        vm.expectRevert(abi.encodeWithSelector(StakingModule.InvalidPointsRate.selector, 0, minRate, maxRate));
-        new ERC1967Proxy(
-            address(impl),
-            abi.encodeWithSelector(
-                StakingModule.initialize.selector,
-                address(ppt),
-                admin,
-                keeper,
-                upgrader,
-                0 // too low
-            )
-        );
-    }
+    // v3.0: 移除 pointsRatePerSecond，此测试已废弃
+    // function test_initialization_invalidPointsRate_tooLow_reverts() public {}
 
     function test_roles() public view {
         assertTrue(stakingModule.hasRole(stakingModule.ADMIN_ROLE(), admin));
@@ -244,8 +224,8 @@ contract StakingModuleTest is Test {
         // Hmm, this is getting very large. Let me just test relative values.
         assertTrue(points > 0, "Should have earned points");
 
-        // Verify the calculation
-        uint256 expected = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * 1 days) / BOOST_BASE;
+        // Verify the calculation (v3.0: 移除 pointsRatePerSecond)
+        uint256 expected = (amount * BOOST_BASE * 1 days) / BOOST_BASE;
         assertEq(points, expected, "Points should match expected");
     }
 
@@ -367,8 +347,8 @@ contract StakingModuleTest is Test {
         uint256 points2 = stakingModule.getPoints(user2);
 
         // User1: 2 days of points
-        // User2: 1 day of points
-        uint256 expectedPerDay = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * 1 days) / BOOST_BASE;
+        // User2: 1 day of points (v3.0: 移除 pointsRatePerSecond)
+        uint256 expectedPerDay = (amount * BOOST_BASE * 1 days) / BOOST_BASE;
         assertEq(points1, expectedPerDay * 2, "User1 should have 2 days of points");
         assertEq(points2, expectedPerDay, "User2 should have 1 day of points");
 
@@ -559,9 +539,9 @@ contract StakingModuleTest is Test {
 
         uint256 points = stakingModule.getPoints(user1);
 
-        // Expected: amount * boost(2.0x) * rate * duration / BOOST_BASE
+        // Expected: amount * boost(2.0x) * duration / BOOST_BASE (v3.0: 移除 rate)
         uint256 boost = stakingModule.calculateBoostFromDays(365);
-        uint256 expected = (amount * boost * POINTS_RATE_PER_SECOND * 1 days) / BOOST_BASE;
+        uint256 expected = (amount * boost * 1 days) / BOOST_BASE;
         assertEq(points, expected);
     }
 
@@ -697,20 +677,9 @@ contract StakingModuleTest is Test {
     // Admin Functions Tests
     // =============================================================================
 
-    function test_setPointsRate() public {
-        uint256 newRate = 2e15;
-
-        vm.prank(admin);
-        stakingModule.setPointsRate(newRate);
-
-        assertEq(stakingModule.pointsRatePerSecond(), newRate);
-    }
-
-    function test_setPointsRate_unauthorized_reverts() public {
-        vm.prank(user1);
-        vm.expectRevert();
-        stakingModule.setPointsRate(2e15);
-    }
+    // v3.0: 移除 pointsRatePerSecond，这些测试已废弃
+    // function test_setPointsRate() public {}
+    // function test_setPointsRate_unauthorized_reverts() public {}
 
     function test_setActive() public {
         vm.prank(admin);
@@ -824,9 +793,9 @@ contract StakingModuleTest is Test {
 
         uint256 estimated = stakingModule.estimatePoints(amount, lockDays, holdDuration);
 
-        // Credit card mode: fixed rate regardless of other stakers
+        // Credit card mode: fixed rate regardless of other stakers (v3.0: 移除 rate)
         uint256 boost = stakingModule.calculateBoostFromDays(lockDays);
-        uint256 expected = (amount * boost * POINTS_RATE_PER_SECOND * holdDuration) / BOOST_BASE;
+        uint256 expected = (amount * boost * holdDuration) / BOOST_BASE;
         assertEq(estimated, expected);
     }
 
@@ -908,8 +877,8 @@ contract StakingModuleTest is Test {
     }
 
     function testFuzz_stakeFlexible(uint256 amount) public {
-        // Bound inputs
-        amount = bound(amount, 1e18, 1e30);
+        // Bound inputs (MIN_STAKE_AMOUNT = 100e18)
+        amount = bound(amount, 100e18, 1e30);
 
         _mintAndApprove(user1, amount);
 
@@ -925,8 +894,8 @@ contract StakingModuleTest is Test {
     }
 
     function testFuzz_stakeLocked(uint256 amount, uint256 lockDays) public {
-        // Bound inputs
-        amount = bound(amount, 1e18, 1e24);
+        // Bound inputs (MIN_STAKE_AMOUNT = 100e18)
+        amount = bound(amount, 100e18, 1e24);
         lockDays = bound(lockDays, 7, 365);
 
         _mintAndApprove(user1, amount);
@@ -943,8 +912,8 @@ contract StakingModuleTest is Test {
     }
 
     function testFuzz_pointsAccumulation(uint256 amount, uint256 duration) public {
-        // Bound inputs
-        amount = bound(amount, 1e18, 1e24);
+        // Bound inputs (MIN_STAKE_AMOUNT = 100e18)
+        amount = bound(amount, 100e18, 1e24);
         duration = bound(duration, 1 hours, 30 days);
 
         _mintAndApprove(user1, amount);
@@ -956,8 +925,8 @@ contract StakingModuleTest is Test {
 
         uint256 points = stakingModule.getPoints(user1);
 
-        // Points should be exactly: amount * 1.0x * rate * duration / BOOST_BASE
-        uint256 expected = (amount * BOOST_BASE * POINTS_RATE_PER_SECOND * duration) / BOOST_BASE;
+        // Points should be exactly: amount * 1.0x * duration / BOOST_BASE (v3.0: 移除 rate)
+        uint256 expected = (amount * BOOST_BASE * duration) / BOOST_BASE;
         assertEq(points, expected);
     }
 
@@ -1122,25 +1091,9 @@ contract StakingModuleTest is Test {
         stakingModule.stakeLocked(tooLarge, 30);
     }
 
-    function test_setPointsRate_tooHigh_reverts() public {
-        uint256 maxRate = stakingModule.MAX_POINTS_RATE();
-        uint256 minRate = stakingModule.MIN_POINTS_RATE();
-        uint256 tooHighRate = maxRate + 1;
-
-        vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(StakingModule.InvalidPointsRate.selector, tooHighRate, minRate, maxRate));
-        stakingModule.setPointsRate(tooHighRate);
-    }
-
-    function test_setPointsRate_tooLow_reverts() public {
-        uint256 maxRate = stakingModule.MAX_POINTS_RATE();
-        uint256 minRate = stakingModule.MIN_POINTS_RATE();
-        uint256 tooLowRate = 0; // MIN_POINTS_RATE is 1
-
-        vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(StakingModule.InvalidPointsRate.selector, tooLowRate, minRate, maxRate));
-        stakingModule.setPointsRate(tooLowRate);
-    }
+    // v3.0: 移除 pointsRatePerSecond，这些测试已废弃
+    // function test_setPointsRate_tooHigh_reverts() public {}
+    // function test_setPointsRate_tooLow_reverts() public {}
 
     function test_setPpt_notAContract_reverts() public {
         address notContract = makeAddr("notContract");

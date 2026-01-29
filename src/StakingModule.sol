@@ -11,13 +11,16 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {IPointsModule} from "./interfaces/IPointsModule.sol";
 
-/// @title 质押模块 v2.1 - 信用卡积分模式（优化版）
+/// @title 质押模块 v3.0 - 简化积分模式
 /// @author Paimon Protocol
 /// @notice 带时间锁定加成的PPT质押积分模块
-/// @dev 使用"信用卡积分"模式：积分 = 质押金额 × boost × pointsRate × 时长
+/// @dev 使用简化积分模式：积分 = 质押金额 × boost × 时长 / BOOST_BASE
 ///      每个用户的积分只与自己的行为相关，后入者不会被稀释
 ///      支持灵活质押（随时取出，1.0x boost）和锁定质押（7-365天，1.02x-2.0x boost）
-///      v2.1 优化：unstake 时清理质押记录，减少遍历成本和存储占用
+///      v2.1 优化：unstake 时清理质押记录，减少存储占用
+///      v2.2 优化：使用活跃索引数组，突破质押次数限制，循环次数 = 活跃数量
+///      v2.3 优化：添加最小质押金额（100 PPT），防止垃圾质押攻击
+///      v3.0 简化：移除 pointsRatePerSecond，使用固定公式计算积分
 contract StakingModule is
     IPointsModule,
     Initializable,
@@ -45,18 +48,15 @@ contract StakingModule is
     uint256 public constant MAX_STAKES_PER_USER = 100;
 
     string public constant MODULE_NAME = "PPT Staking";
-    string public constant VERSION = "2.1.0";
+    string public constant VERSION = "3.0.0";
 
     uint256 public constant MAX_BATCH_USERS = 100;
 
+    /// @notice 最小质押金额（防止垃圾质押攻击）
+    uint256 public constant MIN_STAKE_AMOUNT = 100e18; // 100 PPT
+
     /// @notice 最大质押金额，防止uint128溢出
     uint256 public constant MAX_STAKE_AMOUNT = type(uint128).max / 2;
-
-    /// @notice 每秒最小积分率
-    uint256 public constant MIN_POINTS_RATE = 1;
-
-    /// @notice 每秒最大积分率（防止计算溢出）
-    uint256 public constant MAX_POINTS_RATE = 1e24;
 
     // =============================================================================
     // Data Structures
@@ -97,10 +97,6 @@ contract StakingModule is
     /// @notice PPT代币合约
     IERC20 public ppt;
 
-    /// @notice 每秒每个PPT生成的积分（1e18精度）
-    /// @dev 信用卡模式：积分 = amount × boost × pointsRatePerSecond × duration / BOOST_BASE
-    uint256 public pointsRatePerSecond;
-
     /// @notice 用户状态映射
     mapping(address => UserState) public userStates;
 
@@ -119,6 +115,11 @@ contract StakingModule is
     /// @notice 用户已累计的历史积分（来自已赎回的质押）
     /// @dev 优化：避免遍历已赎回的质押记录
     mapping(address => uint256) public userAccruedHistoricalPoints;
+
+    /// @notice 用户的活跃质押索引列表（动态数组）
+    /// @dev v2.2 优化：只存储活跃质押的索引，突破 MAX_STAKES_PER_USER 限制
+    ///      删除质押后，索引会从数组中移除，可以创建新质押
+    mapping(address => uint256[]) private userActiveStakeIndices;
 
     // =============================================================================
     // Events
@@ -153,7 +154,6 @@ contract StakingModule is
     /// @notice 当批量检查点中跳过零地址时触发
     event ZeroAddressSkipped(uint256 indexed position);
 
-    event PointsRateUpdated(uint256 oldRate, uint256 newRate);
     event ModuleActiveStatusUpdated(bool active);
     event StakingModuleUpgraded(address indexed newImplementation, uint256 timestamp);
     event MinHoldingBlocksUpdated(uint256 oldBlocks, uint256 newBlocks);
@@ -174,7 +174,7 @@ contract StakingModule is
     error StakeNotActive(uint256 stakeIndex);
     error BatchTooLarge(uint256 size, uint256 max);
     error AmountTooLarge(uint256 amount, uint256 max);
-    error InvalidPointsRate(uint256 rate, uint256 min, uint256 max);
+    error AmountTooSmall(uint256 amount, uint256 min);
     error NotAContract(address addr);
     error InvalidERC20(address addr);
 
@@ -192,8 +192,7 @@ contract StakingModule is
     /// @param admin 管理员地址
     /// @param keeper Keeper地址（用于检查点）
     /// @param upgrader 升级者地址（通常是时间锁）
-    /// @param _pointsRatePerSecond 每秒每个PPT的初始积分率
-    function initialize(address _ppt, address admin, address keeper, address upgrader, uint256 _pointsRatePerSecond)
+    function initialize(address _ppt, address admin, address keeper, address upgrader)
         external
         initializer
     {
@@ -204,9 +203,6 @@ contract StakingModule is
             revert NotAContract(_ppt);
         }
         _validateERC20(_ppt);
-        if (_pointsRatePerSecond < MIN_POINTS_RATE || _pointsRatePerSecond > MAX_POINTS_RATE) {
-            revert InvalidPointsRate(_pointsRatePerSecond, MIN_POINTS_RATE, MAX_POINTS_RATE);
-        }
 
         __AccessControl_init();
         __Pausable_init();
@@ -214,7 +210,6 @@ contract StakingModule is
         __UUPSUpgradeable_init();
 
         ppt = IERC20(_ppt);
-        pointsRatePerSecond = _pointsRatePerSecond;
         active = true;
         minHoldingBlocks = 1;
 
@@ -286,7 +281,7 @@ contract StakingModule is
     // =============================================================================
 
     /// @notice 计算单个质押从上次累计到现在的积分
-    /// @dev 信用卡模式：积分 = amount × effectiveBoost × pointsRatePerSecond × duration / BOOST_BASE
+    /// @dev 简化模式：积分 = amount × effectiveBoost × duration / BOOST_BASE
     /// @param stake 质押信息
     /// @return 新增积分
     function _calculateStakePointsSinceLastAccrual(StakeInfo storage stake) internal view returns (uint256) {
@@ -297,8 +292,8 @@ contract StakingModule is
 
         uint256 effectiveBoost = _getEffectiveBoost(stake);
 
-        // 积分 = amount × effectiveBoost × pointsRatePerSecond × duration / BOOST_BASE
-        return (uint256(stake.amount) * effectiveBoost * pointsRatePerSecond * duration) / BOOST_BASE;
+        // 积分 = amount × effectiveBoost × duration / BOOST_BASE
+        return (uint256(stake.amount) * effectiveBoost * duration) / BOOST_BASE;
     }
 
     /// @notice 计算单个质押的总积分（包括已累计 + 待累计）
@@ -351,11 +346,14 @@ contract StakingModule is
         returns (uint256 stakeIndex)
     {
         if (amount == 0) revert ZeroAmount();
+        if (amount < MIN_STAKE_AMOUNT) revert AmountTooSmall(amount, MIN_STAKE_AMOUNT);
         if (amount > MAX_STAKE_AMOUNT) revert AmountTooLarge(amount, MAX_STAKE_AMOUNT);
 
         uint256 currentCount = userStakeCount[user];
-        if (currentCount >= MAX_STAKES_PER_USER) {
-            revert MaxStakesReached(currentCount, MAX_STAKES_PER_USER);
+        // 🔥 优化：检查活跃质押数量，而不是总数量（允许删除后复用）
+        uint256 activeCount = userActiveStakeIndices[user].length;
+        if (activeCount >= MAX_STAKES_PER_USER) {
+            revert MaxStakesReached(activeCount, MAX_STAKES_PER_USER);
         }
 
         // 从用户转入PPT
@@ -385,6 +383,9 @@ contract StakingModule is
         userStates[user].totalStakedAmount += amount;
         userStates[user].lastCheckpointBlock = block.number;
         userStakeCount[user] = currentCount + 1;
+
+        // 🔥 新增：将索引添加到活跃列表
+        userActiveStakeIndices[user].push(stakeIndex);
 
         emit Staked(user, stakeIndex, amount, stakeType, lockDurationDays, boost, lockEndTime);
     }
@@ -443,11 +444,34 @@ contract StakingModule is
         // 删除质押记录（释放存储空间，可获得 gas refund）
         delete userStakes[user][stakeIndex];
 
+        // 🔥 新增：从活跃索引列表中移除
+        _removeFromActiveList(user, stakeIndex);
+
         // 将PPT返还给用户
         ppt.safeTransfer(user, amount);
 
         emit Unstaked(user, stakeIndex, amount, actualPenalty, theoreticalPenalty, isEarlyUnlock, penaltyWasCapped);
         emit StakeRecordDeleted(user, stakeIndex, finalAccruedPoints);
+    }
+
+    /// @notice 从活跃索引列表中移除指定索引
+    /// @param user 用户地址
+    /// @param stakeIndex 要移除的质押索引
+    function _removeFromActiveList(address user, uint256 stakeIndex) internal {
+        uint256[] storage indices = userActiveStakeIndices[user];
+        uint256 length = indices.length;
+        
+        for (uint256 i = 0; i < length;) {
+            if (indices[i] == stakeIndex) {
+                // 将最后一个元素移到当前位置（gas 优化）
+                indices[i] = indices[length - 1];
+                indices.pop();
+                break;
+            }
+            unchecked {
+                ++i;
+            }
+        }
     }
 
     /// @notice 计算提前解锁惩罚
@@ -479,20 +503,20 @@ contract StakingModule is
     }
 
     /// @notice 计算用户所有质押的总积分
-    /// @dev 🔥 优化：只遍历活跃的质押，已赎回的积分从 userAccruedHistoricalPoints 读取
+    /// @dev 🔥 v2.2 优化：只遍历活跃索引数组，循环次数 = 活跃质押数量
     function _calculateUserTotalPoints(address user) internal view returns (uint256 total) {
         // 1. 加上已赎回质押的历史积分
         total = userAccruedHistoricalPoints[user];
 
-        // 2. 只遍历活跃的质押（跳过已删除的记录）
-        uint256 count = userStakeCount[user];
-        for (uint256 i = 0; i < count;) {
-            StakeInfo storage stake = userStakes[user][i];
-            // 跳过已删除的质押记录（amount 被 delete 后为 0）
-            if (stake.amount > 0 && stake.isActive) {
-                // 活跃质押：累计积分 + 待累计积分
-                total += _calculateStakeTotalPoints(stake);
-            }
+        // 2. 只遍历活跃索引（循环次数 = 活跃质押数量）
+        uint256[] memory activeIndices = userActiveStakeIndices[user];
+        uint256 length = activeIndices.length;
+        
+        for (uint256 i = 0; i < length;) {
+            StakeInfo storage stake = userStakes[user][activeIndices[i]];
+            // 活跃质押：累计积分 + 待累计积分
+            total += _calculateStakeTotalPoints(stake);
+            
             unchecked {
                 ++i;
             }
@@ -526,18 +550,8 @@ contract StakingModule is
         totalStakedAmount = userStates[user].totalStakedAmount;
         earnedPoints = _calculateUserTotalPoints(user);
 
-        // 计算活跃质押数（跳过已删除的记录）
-        uint256 count = userStakeCount[user];
-        for (uint256 i = 0; i < count;) {
-            StakeInfo storage stake = userStakes[user][i];
-            // 只统计未被删除且活跃的质押
-            if (stake.amount > 0 && stake.isActive) {
-                ++activeStakeCount;
-            }
-            unchecked {
-                ++i;
-            }
-        }
+        // 🔥 优化：直接从活跃索引数组获取数量（O(1)）
+        activeStakeCount = userActiveStakeIndices[user].length;
     }
 
     /// @notice 获取用户的质押详情
@@ -572,7 +586,7 @@ contract StakingModule is
         isLockExpired = stake.stakeType == StakeType.Locked && block.timestamp >= stake.lockEndTime;
     }
 
-    /// @notice 获取用户的所有质押
+    /// @notice 获取用户的所有质押（包括已删除的空槽位）
     /// @param user 用户地址
     /// @return stakes 质押信息数组
     function getAllStakes(address user) external view returns (StakeInfo[] memory stakes) {
@@ -580,6 +594,29 @@ contract StakingModule is
         stakes = new StakeInfo[](count);
         for (uint256 i = 0; i < count;) {
             stakes[i] = userStakes[user][i];
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice 获取用户的活跃质押索引列表
+    /// @param user 用户地址
+    /// @return indices 活跃质押索引数组
+    function getActiveStakeIndices(address user) external view returns (uint256[] memory indices) {
+        return userActiveStakeIndices[user];
+    }
+
+    /// @notice 获取用户的所有活跃质押详情（只包含活跃的，不包含已删除的）
+    /// @param user 用户地址
+    /// @return stakes 活跃质押信息数组
+    function getActiveStakes(address user) external view returns (StakeInfo[] memory stakes) {
+        uint256[] memory indices = userActiveStakeIndices[user];
+        uint256 length = indices.length;
+        stakes = new StakeInfo[](length);
+        
+        for (uint256 i = 0; i < length;) {
+            stakes[i] = userStakes[user][indices[i]];
             unchecked {
                 ++i;
             }
@@ -599,8 +636,8 @@ contract StakingModule is
         if (amount == 0) revert ZeroAmount();
 
         uint256 boost = calculateBoostFromDays(lockDurationDays);
-        // 积分 = amount × boost × pointsRatePerSecond × duration / BOOST_BASE
-        return (amount * boost * pointsRatePerSecond * holdDurationSeconds) / BOOST_BASE;
+        // 积分 = amount × boost × duration / BOOST_BASE
+        return (amount * boost * holdDurationSeconds) / BOOST_BASE;
     }
 
     /// @notice 计算潜在的提前解锁惩罚
@@ -704,19 +741,6 @@ contract StakingModule is
     // Admin Functions
     // =============================================================================
 
-    /// @notice 设置每秒积分率
-    /// @param newRate 新的比率（1e18精度）
-    function setPointsRate(uint256 newRate) external onlyRole(ADMIN_ROLE) {
-        if (newRate < MIN_POINTS_RATE || newRate > MAX_POINTS_RATE) {
-            revert InvalidPointsRate(newRate, MIN_POINTS_RATE, MAX_POINTS_RATE);
-        }
-
-        uint256 oldRate = pointsRatePerSecond;
-        pointsRatePerSecond = newRate;
-
-        emit PointsRateUpdated(oldRate, newRate);
-    }
-
     /// @notice 设置模块激活状态
     /// @param _active 模块是否激活
     function setActive(bool _active) external onlyRole(ADMIN_ROLE) {
@@ -766,5 +790,6 @@ contract StakingModule is
 
     /// @dev 预留存储空间，以便在未来升级中允许布局更改
     /// @dev v2.1: 减少1个槽位（添加了 userAccruedHistoricalPoints）
-    uint256[49] private __gap;
+    /// @dev v2.2: 减少1个槽位（添加了 userActiveStakeIndices）
+    uint256[48] private __gap;
 }
