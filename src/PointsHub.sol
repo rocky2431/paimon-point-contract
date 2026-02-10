@@ -45,8 +45,8 @@ contract PointsHub is
 
     /// @notice 积分显示精度（类似 ERC20 decimals）
     /// @dev 前端显示时: displayPoints = rawPoints / 10^POINTS_DECIMALS
-    /// 例: rawPoints = 8.64e24 → displayPoints = 8.64
-    uint8 public constant POINTS_DECIMALS = 24;
+    /// 例: rawPoints = 1e18 (1 PPT × 1s × 1.0x) → displayPoints = 0.00001
+    uint8 public constant POINTS_DECIMALS = 23;
 
     /// @notice 用于跟踪升级的合约版本
     string public constant VERSION = "1.3.0";
