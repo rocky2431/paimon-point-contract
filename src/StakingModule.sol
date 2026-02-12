@@ -19,7 +19,7 @@ import {IPointsModule} from "./interfaces/IPointsModule.sol";
 ///      支持灵活质押（随时取出，1.0x boost）和锁定质押（7-365天，1.02x-2.0x boost）
 ///      v2.1 优化：unstake 时清理质押记录，减少存储占用
 ///      v2.2 优化：使用活跃索引数组，突破质押次数限制，循环次数 = 活跃数量
-///      v2.3 优化：添加最小质押金额（100 PPT），防止垃圾质押攻击
+///      v2.3 优化：添加最小质押金额（10 PPT），防止垃圾质押攻击
 contract StakingModule is
     IPointsModule,
     Initializable,
@@ -53,7 +53,7 @@ contract StakingModule is
     uint256 public constant MAX_BATCH_USERS = 100;
 
     /// @notice 最小质押金额（防止垃圾质押攻击）
-    uint256 public constant MIN_STAKE_AMOUNT = 100e18; // 100 PPT
+    uint256 public constant MIN_STAKE_AMOUNT = 10e18; // 10 PPT
 
     /// @notice 最大质押金额，防止uint128溢出
     uint256 public constant MAX_STAKE_AMOUNT = type(uint128).max / 2;

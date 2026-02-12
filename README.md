@@ -305,7 +305,7 @@ PPT 质押积分模块，支持**灵活质押**和**锁定质押**两种模式�
 | `EARLY_UNLOCK_PENALTY_BPS` | `5000` | 提前解锁惩罚 (50%) |
 | `MAX_STAKES_PER_USER` | `100` | 每用户最大质押数 |
 | `MAX_BATCH_USERS` | `100` | 批量 checkpoint 最大用户数 |
-| `MIN_STAKE_AMOUNT` | `100e18` | 最小质押量 (100 PPT) |
+| `MIN_STAKE_AMOUNT` | `10e18` | 最小质押量 (10 PPT) |
 | `MAX_STAKE_AMOUNT` | `type(uint128).max / 2` | 最大质押量（防止积分计算乘法溢出） |
 | `MIN_POINTS_RATE` | `1` | 最小积分率 |
 | `MAX_POINTS_RATE` | `1e24` | 最大积分率 |

@@ -305,22 +305,33 @@ contract StakingModuleTest is Test {
 
     function test_stake_maxStakesReached_reverts() public {
         uint256 maxStakes = stakingModule.MAX_STAKES_PER_USER();
-        _mintAndApprove(user1, (maxStakes + 1) * 100e18);
+        uint256 minAmount = stakingModule.MIN_STAKE_AMOUNT();
+        _mintAndApprove(user1, (maxStakes + 1) * minAmount);
 
         vm.startPrank(user1);
 
         // Create max stakes
         for (uint256 i = 0; i < maxStakes; i++) {
-            ppt.approve(address(stakingModule), 100e18);
-            stakingModule.stakeFlexible(100e18);
+            ppt.approve(address(stakingModule), minAmount);
+            stakingModule.stakeFlexible(minAmount);
         }
 
         // Next stake should fail
-        ppt.approve(address(stakingModule), 100e18);
+        ppt.approve(address(stakingModule), minAmount);
         vm.expectRevert(abi.encodeWithSelector(StakingModule.MaxStakesReached.selector, maxStakes, maxStakes));
-        stakingModule.stakeFlexible(100e18);
+        stakingModule.stakeFlexible(minAmount);
 
         vm.stopPrank();
+    }
+
+    function test_stake_belowMinimum_reverts() public {
+        uint256 minAmount = stakingModule.MIN_STAKE_AMOUNT();
+        uint256 belowMin = minAmount - 1;
+        _mintAndApprove(user1, belowMin);
+
+        vm.prank(user1);
+        vm.expectRevert(abi.encodeWithSelector(StakingModule.AmountTooSmall.selector, belowMin, minAmount));
+        stakingModule.stakeFlexible(belowMin);
     }
 
     // =============================================================================
@@ -892,8 +903,8 @@ contract StakingModuleTest is Test {
     }
 
     function testFuzz_stakeFlexible(uint256 amount) public {
-        // Bound inputs (MIN_STAKE_AMOUNT = 100e18)
-        amount = bound(amount, 100e18, 1e30);
+        // Bound inputs (MIN_STAKE_AMOUNT = 10e18)
+        amount = bound(amount, 10e18, 1e30);
 
         _mintAndApprove(user1, amount);
 
@@ -909,8 +920,8 @@ contract StakingModuleTest is Test {
     }
 
     function testFuzz_stakeLocked(uint256 amount, uint256 lockDays) public {
-        // Bound inputs (MIN_STAKE_AMOUNT = 100e18)
-        amount = bound(amount, 100e18, 1e24);
+        // Bound inputs (MIN_STAKE_AMOUNT = 10e18)
+        amount = bound(amount, 10e18, 1e24);
         lockDays = bound(lockDays, 7, 365);
 
         _mintAndApprove(user1, amount);
@@ -927,8 +938,8 @@ contract StakingModuleTest is Test {
     }
 
     function testFuzz_pointsAccumulation(uint256 amount, uint256 duration) public {
-        // Bound inputs (MIN_STAKE_AMOUNT = 100e18)
-        amount = bound(amount, 100e18, 1e24);
+        // Bound inputs (MIN_STAKE_AMOUNT = 10e18)
+        amount = bound(amount, 10e18, 1e24);
         duration = bound(duration, 1 hours, 30 days);
 
         _mintAndApprove(user1, amount);

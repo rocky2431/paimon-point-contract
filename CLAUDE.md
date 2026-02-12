@@ -121,7 +121,7 @@ StakingModule, LPModule 使用检查点系统防止闪电贷攻击：
 | PointsHub | `MAX_MODULES` | 10 | 最大可注册模块数 |
 | StakingModule | `RATE_PRECISION` | 1e18 | pointsRatePerSecond 精度基准 |
 | StakingModule | `BOOST_BASE` | 10000 | Boost 基数 (1x=10000, 2x=20000) |
-| StakingModule | `MIN_STAKE_AMOUNT` | 100e18 | 最小质押量 (100 PPT) |
+| StakingModule | `MIN_STAKE_AMOUNT` | 10e18 | 最小质押量 (10 PPT) |
 | StakingModule | `EARLY_UNLOCK_PENALTY_BPS` | 5000 (50%) | 提前解锁罚金比例 |
 | StakingModule | `MIN_LOCK_DURATION` | 7 days | 最短锁定期 |
 | StakingModule | `MAX_LOCK_DURATION` | 365 days | 最长锁定期 |
